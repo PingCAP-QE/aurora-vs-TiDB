@@ -75,12 +75,12 @@ func main() {
 	switch action {
 	case "create-rds":
 		if clusterID == "" || instanceID == "" || paramGroupName == "" {
-			log.Fatalf("For 'create' action, --cluster-id, --instance-id, and --param-group-name are required")
+			log.Fatalf("For 'create-rds' action, --cluster-id, --instance-id, and --param-group-name are required")
 		}
 		createResources(rdsClient, clusterID, instanceID, paramGroupName, masterPassword, dbInstanceClass)
 	case "delete-rds":
 		if clusterID == "" || instanceID == "" || paramGroupName == "" {
-			log.Fatalf("For 'delete' action, --cluster-id, --instance-id, and --param-group-name are required")
+			log.Fatalf("For 'delete-rds' action, --cluster-id, --instance-id, and --param-group-name are required")
 		}
 		deleteResources(rdsClient, clusterID, instanceID, paramGroupName)
 	case "modify-params":
@@ -88,6 +88,16 @@ func main() {
 			log.Fatalf("For 'modify-params' action, --cluster-id and --param-group-name are required")
 		}
 		modifyClusterParameters(rdsClient, clusterID, paramGroupName)
+	case "get-rds-endpoint":
+		if clusterID == "" {
+			log.Fatalf("For 'get-rds-endpoint' action, --cluster-id and -is required")
+		}
+		loginInfo, err := getRDSLoginInfo(rdsClient, instanceID, masterPassword)
+		if err != nil {
+			log.Fatalf("Failed to get RDS login information")
+		}
+		fmt.Printf("RDS login command: %s\n", loginInfo)
+
 	case "create-client":
 		if clusterID == "" || ec2ImageID == "" || ec2InstanceType == "" || ec2KeyName == "" {
 			log.Fatalf("For 'create-client' action, --cluster-id is required")
@@ -456,4 +466,26 @@ func deleteClientEC2(ec2Client *ec2.Client, instanceID string) error {
 	fmt.Printf("EC2 instance is terminated: %s\n", instanceID)
 
 	return nil
+}
+
+func getRDSLoginInfo(rdsClient *rds.Client, intanceID string, passwd string) (string, error) {
+	// 获取Aurora集群的详细信息
+	describeDBClustersInput := &rds.DescribeDBClustersInput{
+		DBClusterIdentifier: &intanceID,
+	}
+	dbClustersOutput, err := rdsClient.DescribeDBClusters(context.TODO(), describeDBClustersInput)
+	if err != nil {
+		log.Fatalf("Failed to describe DBClusters: %v", err)
+		return "", err
+	}
+	if len(dbClustersOutput.DBClusters) == 0 {
+		log.Fatalf("No DBCluster found with ID %s", intanceID)
+		return "", err
+	}
+
+	// 获取Cluster Endpoint
+	clusterEndpoint := dbClustersOutput.DBClusters[0].Endpoint
+	clusterPort := dbClustersOutput.DBClusters[0].Port
+	loginCommand := fmt.Sprintf("mysql -h %s -P %d -u admin -p'%s'", *clusterEndpoint, *clusterPort, passwd)
+	return loginCommand, nil
 }
