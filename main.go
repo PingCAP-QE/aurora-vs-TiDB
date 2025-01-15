@@ -39,7 +39,7 @@ func main() {
 	pflag.StringVarP(&action, "action", "a", "", "Action to perform: 'create', 'delete', or 'modify-params'")
 	pflag.StringVarP(&clusterID, "cluster-id", "c", "", "Aurora cluster identifier")
 	pflag.StringVarP(&instanceID, "instance-id", "i", "", "Aurora instance identifier")
-	pflag.StringVarP(&paramGroupName, "param-group-name", "p", "", "Parameter group name")
+	pflag.StringVarP(&paramGroupName, "param-group-name", "p", "my-custom-aurora-mysql80", "Parameter group name(default: my-custom-aurora-mysql80)")
 	pflag.StringVarP(&dbInstanceClass, "instance-class", "d", "db.r6g.4xlarge", "Aurora instance class (default: db.r6g.4xlarge)")
 	pflag.StringVarP(&ec2InstanceType, "ec2-instance-type", "t", "m5.2xlarge", "EC2 instance type (default: m5.2xlarge)")
 	pflag.StringVarP(&ec2ImageID, "ec2-image-id", "m", "ami-0c55b159cbfafe1f0", "EC2 image ID (default: ami-0c55b159cbfafe1f0)")
@@ -48,12 +48,9 @@ func main() {
 	pflag.StringVarP(&ec2KeyName, "ec2-key-name", "k", "", "EC2 key pair name")
 	pflag.Parse()
 
-	if action == "" || clusterID == "" || instanceID == "" || paramGroupName == "" {
-		log.Fatalf("All parameters --action, --cluster-id, --instance-id, and --param-group-name are required")
-	}
-
 	// 验证参数组名称是否符合要求
 	if !isValidParamGroupName(paramGroupName) {
+		fmt.Printf("groupname is %s\n", paramGroupName)
 		log.Fatalf("Invalid DBClusterParameterGroupName: %s. Name must start with a letter, contain only ASCII letters, digits, and hyphens, and must not end with a hyphen or contain two consecutive hyphens or a period.", paramGroupName)
 	}
 
@@ -70,34 +67,30 @@ func main() {
 	}
 
 	// 创建RDS客户端
-	client := rds.NewFromConfig(cfg)
+	rdsClient := rds.NewFromConfig(cfg)
 	ec2Client := ec2.NewFromConfig(cfg)
 
 	switch action {
 	case "create":
 		if clusterID == "" || instanceID == "" || paramGroupName == "" {
 			log.Fatalf("For 'create' action, --cluster-id, --instance-id, and --param-group-name are required")
-			return
 		}
-		createResources(client, clusterID, instanceID, paramGroupName, masterPassword, dbInstanceClass)
+		createResources(rdsClient, clusterID, instanceID, paramGroupName, masterPassword, dbInstanceClass)
 	case "delete":
 		if clusterID == "" || instanceID == "" || paramGroupName == "" {
 			log.Fatalf("For 'delete' action, --cluster-id, --instance-id, and --param-group-name are required")
-			return
 		}
-		deleteResources(client, clusterID, instanceID, paramGroupName)
+		deleteResources(rdsClient, clusterID, instanceID, paramGroupName)
 	case "modify-params":
 		if clusterID == "" || paramGroupName == "" {
 			log.Fatalf("For 'modify-params' action, --cluster-id and --param-group-name are required")
-			return
 		}
-		modifyClusterParameters(client, clusterID, paramGroupName)
+		modifyClusterParameters(rdsClient, clusterID, paramGroupName)
 	case "create-client-ec2":
-		if ec2InstanceType == "" || ec2ImageID == "" || ec2SubnetID == "" || ec2SecurityGroupID == "" || ec2KeyName == "" {
-			log.Fatalf("For 'create-client-ec2' action, --ec2-instance-type, --ec2-image-id, --ec2-subnet-id, --ec2-security-group-id, and --ec2-key-name are required")
-			return
+		if clusterID == "" || ec2ImageID == "" || ec2InstanceType == "" || ec2KeyName == "" {
+			log.Fatalf("For 'create-client-ec2' action, --cluster-id is required")
 		}
-		instanceID, err := createClientEC2(ec2Client, ec2InstanceType, ec2ImageID, ec2SubnetID, ec2SecurityGroupID, ec2KeyName)
+		instanceID, err := createClientEC2(rdsClient, ec2Client, clusterID, ec2InstanceType, ec2ImageID, ec2KeyName)
 		if err != nil {
 			log.Fatalf("Failed to create client EC2 instance: %v", err)
 		}
@@ -238,22 +231,40 @@ func deleteResources(client *rds.Client, clusterID, instanceID, paramGroupName s
 	fmt.Printf("DBClusterParameterGroup deleted: %s\n", paramGroupName)
 }
 
-func createClientEC2(client *ec2.Client, instanceType, imageID, subnetID, securityGroupID, keyName string) (string, error) {
-	var instancenum int32 = 1
+func createClientEC2(rdsClient *rds.Client, ec2Client *ec2.Client, clusterID, instanceType, imageID, keyName string) (string, error) {
+	var ec2count int32 = 1
+	// 获取Aurora集群的VPC ID
+	vpcID, err := getAuroraClusterVPC(rdsClient, clusterID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get Aurora cluster VPC: %v", err)
+	}
+
+	// 创建新的安全组
+	securityGroupID, err := createSecurityGroup(ec2Client, vpcID)
+	if err != nil {
+		return "", fmt.Errorf("failed to create security group: %v", err)
+	}
+
+	// 获取默认子网
+	subnetID, err := getDefaultSubnet(ec2Client, vpcID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get default subnet: %v", err)
+	}
+
 	// 创建EC2实例
 	runInstancesInput := &ec2.RunInstancesInput{
 		ImageId:      &imageID,
 		InstanceType: ec2type.InstanceType(instanceType),
 		KeyName:      &keyName,
-		MinCount:     &instancenum,
-		MaxCount:     &instancenum,
+		MinCount:     &ec2count,
+		MaxCount:     &ec2count,
 		SubnetId:     &subnetID,
 		SecurityGroupIds: []string{
 			securityGroupID,
 		},
 	}
 
-	runInstancesOutput, err := client.RunInstances(context.TODO(), runInstancesInput)
+	runInstancesOutput, err := ec2Client.RunInstances(context.TODO(), runInstancesInput)
 	if err != nil {
 		return "", fmt.Errorf("failed to create EC2 instance: %v", err)
 	}
@@ -264,7 +275,7 @@ func createClientEC2(client *ec2.Client, instanceType, imageID, subnetID, securi
 	fmt.Printf("EC2 instance ID: %s\n", *instanceID)
 
 	// 等待实例运行
-	waiter := ec2.NewInstanceRunningWaiter(client)
+	waiter := ec2.NewInstanceRunningWaiter(ec2Client)
 	err = waiter.Wait(context.TODO(), &ec2.DescribeInstancesInput{
 		InstanceIds: []string{*instanceID},
 	}, 10*time.Minute)
@@ -274,4 +285,86 @@ func createClientEC2(client *ec2.Client, instanceType, imageID, subnetID, securi
 	fmt.Printf("EC2 instance is running: %s\n", *instanceID)
 
 	return *instanceID, nil
+}
+
+func getAuroraClusterVPC(client *rds.Client, clusterID string) (string, error) {
+	// 获取Aurora集群的详细信息
+	describeDBClustersInput := &rds.DescribeDBClustersInput{
+		DBClusterIdentifier: &clusterID,
+	}
+	dbClustersOutput, err := client.DescribeDBClusters(context.TODO(), describeDBClustersInput)
+	if err != nil {
+		return "", fmt.Errorf("failed to describe DBClusters: %v", err)
+	}
+	if len(dbClustersOutput.DBClusters) == 0 {
+		return "", fmt.Errorf("no DBCluster found with ID %s", clusterID)
+	}
+
+	// 获取DBSubnetGroup名称
+	dbSubnetGroupName := dbClustersOutput.DBClusters[0].DBSubnetGroup
+	if dbSubnetGroupName == nil {
+		return "", fmt.Errorf("DBSubnetGroup name not found for DBCluster %s", clusterID)
+	}
+
+	// 使用子网组名称获取子网组的详细信息
+	describeDBSubnetGroupsInput := &rds.DescribeDBSubnetGroupsInput{
+		DBSubnetGroupName: dbSubnetGroupName,
+	}
+	dbSubnetGroupsOutput, err := client.DescribeDBSubnetGroups(context.TODO(), describeDBSubnetGroupsInput)
+	if err != nil {
+		return "", fmt.Errorf("failed to describe DBSubnetGroups: %v", err)
+	}
+	if len(dbSubnetGroupsOutput.DBSubnetGroups) == 0 {
+		return "", fmt.Errorf("no DBSubnetGroup found with name %s", *dbSubnetGroupName)
+	}
+
+	// 获取VPC ID
+	vpcID := dbSubnetGroupsOutput.DBSubnetGroups[0].VpcId
+	if vpcID == nil {
+		return "", fmt.Errorf("VPC ID not found for DBSubnetGroup %s", *dbSubnetGroupName)
+	}
+
+	return *vpcID, nil
+}
+
+func createSecurityGroup(client *ec2.Client, vpcID string) (string, error) {
+	var securityDesc string = "Security group for EC2 client instance"
+	var sgname string = "ec2-client-sg"
+	// 创建新的安全组
+	createSecurityGroupInput := &ec2.CreateSecurityGroupInput{
+		Description: &securityDesc,
+		GroupName:   &sgname,
+		VpcId:       &vpcID,
+	}
+	securityGroupOutput, err := client.CreateSecurityGroup(context.TODO(), createSecurityGroupInput)
+	if err != nil {
+		return "", fmt.Errorf("failed to create security group: %v", err)
+	}
+	return *securityGroupOutput.GroupId, nil
+}
+
+func getDefaultSubnet(client *ec2.Client, vpcID string) (string, error) {
+	var vpcid string = "vpc-id"
+	var vpconfig string = "default-for-az"
+	// 获取默认子网
+	describeSubnetsInput := &ec2.DescribeSubnetsInput{
+		Filters: []ec2type.Filter{
+			{
+				Name:   &vpcid,
+				Values: []string{vpcID},
+			},
+			{
+				Name:   &vpconfig,
+				Values: []string{"true"},
+			},
+		},
+	}
+	subnetsOutput, err := client.DescribeSubnets(context.TODO(), describeSubnetsInput)
+	if err != nil {
+		return "", fmt.Errorf("failed to describe subnets: %v", err)
+	}
+	if len(subnetsOutput.Subnets) == 0 {
+		return "", fmt.Errorf("no default subnet found in VPC %s", vpcID)
+	}
+	return *subnetsOutput.Subnets[0].SubnetId, nil
 }

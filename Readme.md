@@ -63,6 +63,10 @@ export MASTER_PASSWORD=yourpassword123
 ./aurora-vs-TiDB --action=delete --cluster-id=Aurora-v3060-r6g4xl --instance-id=Aurora-v3060-r6g4xl-instance --param-group-name=my-custom-aurora-mysql80
 ```
 
+#### Create an EC2 instance to connect to the Aurora cluster
+```sh
+./aurora-vs-TiDB --action=create-client-ec2 --ec2-instance-type=m5.2xlarge --ec2-image-id=ami-0c55b159cbfafe1f0 --ec2-subnet-id=subnet-12345678 --ec2-security-group-id=sg-12345678 --ec2-key-name=your-key-pair
+
 ## Error Handling
 
 The tool logs errors and provides descriptive messages to help you diagnose issues. Common errors include:
