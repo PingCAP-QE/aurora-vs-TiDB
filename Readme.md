@@ -1,4 +1,4 @@
-# AWS RDS and EC2 Management Tool
+# AWS Aurora VS TiDB Performance Test Tool
 
 This tool provides an automated way to do aurora automatic performance testing, including RDS Aurora clusters and EC2 instances. It supports various actions like creating, deleting, and modifying resources, as well as initializing environments for performance testing.
 
