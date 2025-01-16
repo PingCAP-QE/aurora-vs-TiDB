@@ -397,7 +397,7 @@ func RunSysbenchPerftest(rdsClient *rds.Client, ssmClient *ssm.Client, ec2instan
 
 	for _, threads := range threadsValues {
 		runCMD := fmt.Sprintf(
-			"sysbench %s run --time=7200 --threads=%d --report-interval=10 --rand-type=uniform --mysql-db=sbtest --mysql-host=%s --mysql-port=%d --mysql-user=admin --mysql-password=%s --tables=50 --table-size=100000000 --mysql-ignore-errors=1062,2013,8028,9007",
+			"sysbench %s run --time=3600 --threads=%d --report-interval=10 --rand-type=uniform --mysql-db=sbtest --mysql-host=%s --mysql-port=%d --mysql-user=admin --mysql-password=%s --tables=50 --table-size=100000000 --mysql-ignore-errors=1062,2013,8028,9007",
 			testtype, threads, *clusterEndpoint, *clusterPort, masterPassword,
 		)
 
