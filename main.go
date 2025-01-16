@@ -13,6 +13,7 @@ import (
 	ec2type "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	rdstype "github.com/aws/aws-sdk-go-v2/service/rds/types"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
 
 	"github.com/spf13/pflag"
 )
@@ -36,18 +37,21 @@ func main() {
 	var ec2SecurityGroupID string
 	var ec2KeyName string
 	var ec2SubnetID string
+	var perfType string
 
-	pflag.StringVarP(&action, "action", "a", "", "Action to perform: 'create-rds', 'delete-rds', 'modify-params', 'create-client', 'delete-client'")
+	pflag.StringVarP(&action, "action", "a", "", "Action to perform: 'create-rds', 'delete-rds', 'modify-params', 'create-client', 'delete-client','init-perftest-env','prepare-data'")
 	pflag.StringVarP(&clusterID, "cluster-id", "c", "", "Aurora cluster identifier")
 	pflag.StringVarP(&instanceID, "instance-id", "i", "", "Aurora instance identifier")
 	pflag.StringVarP(&paramGroupName, "param-group-name", "p", "my-custom-aurora-mysql80", "Parameter group name(default: my-custom-aurora-mysql80)")
 	pflag.StringVarP(&dbInstanceClass, "instance-class", "d", "db.r6g.4xlarge", "Aurora instance class (default: db.r6g.4xlarge)")
 	pflag.StringVarP(&ec2InstanceType, "ec2-instance-type", "t", "m5.2xlarge", "EC2 instance type (default: m5.2xlarge)")
-	pflag.StringVarP(&ec2ImageID, "ec2-image-id", "m", "ami-046d7944dd9e73a61", "EC2 image ID (default: ami-046d7944dd9e73a61)") // amazone linux 2023 ami-id:ami-046d7944dd9e73a61 for default
+	pflag.StringVarP(&ec2ImageID, "ec2-image-id", "m", "ami-0afb6e8e0625142bc", "EC2 image ID (default: ami-0afb6e8e0625142bc)") // amazone linux 2023 ami-id:ami-046d7944dd9e73a61 for default
 	pflag.StringVarP(&ec2InstanceID, "ec2-instance-id", "e", "", "EC2 instance ID")                                              // like  i-0596d9ed0e24f825d
 	pflag.StringVarP(&ec2SubnetID, "ec2-subnet-id", "s", "", "EC2 subnet ID")
 	pflag.StringVarP(&ec2SecurityGroupID, "ec2-security-group-id", "g", "", "EC2 security group ID")
 	pflag.StringVarP(&ec2KeyName, "ec2-key-name", "k", "pub-st-rsa", "EC2 key pair name(default: pub-st-rsa)")
+	pflag.StringVarP(&perfType, "perf-type", "o", "", "Sysbench oltp perf type:oltp_read_only/oltp_read_write/oltp_write_only")
+
 	pflag.Parse()
 
 	// 验证参数组名称是否符合要求
@@ -68,9 +72,10 @@ func main() {
 		log.Fatalf("Unable to load SDK config, %v", err)
 	}
 
-	// 创建RDS客户端
+	// 创建RDS/ec2/ssm客户端
 	rdsClient := rds.NewFromConfig(cfg)
 	ec2Client := ec2.NewFromConfig(cfg)
+	ssmClient := ssm.NewFromConfig(cfg)
 
 	switch action {
 	case "create-rds":
@@ -92,12 +97,11 @@ func main() {
 		if clusterID == "" {
 			log.Fatalf("For 'get-rds-endpoint' action, --cluster-id and -is required")
 		}
-		loginInfo, err := getRDSLoginInfo(rdsClient, instanceID, masterPassword)
+		loginInfo, err := getRDSLoginInfo(rdsClient, clusterID, masterPassword)
 		if err != nil {
 			log.Fatalf("Failed to get RDS login information")
 		}
 		fmt.Printf("RDS login command: %s\n", loginInfo)
-
 	case "create-client":
 		if clusterID == "" || ec2ImageID == "" || ec2InstanceType == "" || ec2KeyName == "" {
 			log.Fatalf("For 'create-client' action, --cluster-id is required")
@@ -117,8 +121,33 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to delete client EC2 instance %s: %v", ec2ImageID, err)
 		}
+	case "init-perftest-env":
+		if ec2InstanceID == "" {
+			log.Fatalf("For 'init-perftest-env' action, --ec2-instance-id is required")
+		}
+		err := initPerfTestEnv(ec2Client, ssmClient, ec2InstanceID)
+		if err != nil {
+			log.Fatalf("Failed to initialize performance test environment: %v", err)
+		}
+		fmt.Println("Performance test environment initialized successfully")
+	case "prepare-data":
+		if ec2InstanceID == "" || clusterID == "" {
+			log.Fatalf("For 'prepare-data' action, --ec2-instance-id and --cluster-id are required")
+		}
+		err := prepareSysbenchDataWithSSM(rdsClient, ssmClient, ec2InstanceID, clusterID, ec2KeyName)
+		if err != nil {
+			log.Fatalf("Prepare data Error: %v\n", err)
+		}
+	case "perftest-run":
+		if ec2InstanceID == "" || clusterID == "" || perfType == "" {
+			log.Fatalf("For 'perftest-run' action, --ec2-instance-id,--cluster-id and --perf-type are required")
+		}
+		err := RunSysbenchPerftest(rdsClient, ssmClient, ec2InstanceID, clusterID, ec2KeyName, perfType)
+		if err != nil {
+			log.Fatalf("Run sysbench perftest Error: %v\n", err)
+		}
 	default:
-		log.Fatalf("Invalid action: %s. Use 'create-rds', 'delete-rds', 'modify-params', or 'create-client'", action)
+		log.Fatalf("Invalid action: %s. Use 'create-rds', 'delete-rds', 'modify-params', 'create-client','init-perftest-env','prepare-data','perftest-run'", action)
 	}
 }
 
@@ -468,10 +497,10 @@ func deleteClientEC2(ec2Client *ec2.Client, instanceID string) error {
 	return nil
 }
 
-func getRDSLoginInfo(rdsClient *rds.Client, intanceID string, passwd string) (string, error) {
+func getRDSLoginInfo(rdsClient *rds.Client, clusterID string, passwd string) (string, error) {
 	// 获取Aurora集群的详细信息
 	describeDBClustersInput := &rds.DescribeDBClustersInput{
-		DBClusterIdentifier: &intanceID,
+		DBClusterIdentifier: &clusterID,
 	}
 	dbClustersOutput, err := rdsClient.DescribeDBClusters(context.TODO(), describeDBClustersInput)
 	if err != nil {
@@ -479,13 +508,13 @@ func getRDSLoginInfo(rdsClient *rds.Client, intanceID string, passwd string) (st
 		return "", err
 	}
 	if len(dbClustersOutput.DBClusters) == 0 {
-		log.Fatalf("No DBCluster found with ID %s", intanceID)
+		log.Fatalf("No DBCluster found with ID %s", clusterID)
 		return "", err
 	}
 
 	// 获取Cluster Endpoint
 	clusterEndpoint := dbClustersOutput.DBClusters[0].Endpoint
 	clusterPort := dbClustersOutput.DBClusters[0].Port
-	loginCommand := fmt.Sprintf("mysql -h %s -P %d -u admin -p'%s'", *clusterEndpoint, *clusterPort, passwd)
+	loginCommand := fmt.Sprintf("mysql -h %s -P %d -u admin -p%s", *clusterEndpoint, *clusterPort, passwd)
 	return loginCommand, nil
 }
