@@ -20,7 +20,7 @@ This tool provides an automated way to do aurora automatic performance testing, 
      ```bash
      aws configure
      ```
-
+   - How to configure the aws config, refer to: https://pingcap.awsapps.com/start/#
 2. **Environment Variables**:
    - Set the `MASTER_PASSWORD` environment variable for the RDS master user password:
      ```bash
