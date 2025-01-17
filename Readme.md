@@ -72,7 +72,7 @@ This tool provides an automated way to do aurora automatic performance testing, 
 
 #### Create an RDS Aurora Cluster
 ```bash
-bin/aurora-vs-TiDB --action=create --cluster-id=Aurora-v3060-r6g4xl --instance-id=Aurora-v3060-r6g4xl-instance --param-group-name=my-custom-aurora-mysql80
+bin/aurora-vs-TiDB --action=create-rds --cluster-id=Aurora-v3060-r6g4xl --instance-id=Aurora-v3060-r6g4xl-instance --param-group-name=my-custom-aurora-mysql80
 ```
 
 #### Modify Aurora Cluster Parameters
@@ -82,7 +82,7 @@ bin/aurora-vs-TiDB --action=modify-params --cluster-id=Aurora-v3060-r6g4xl --par
 
 #### Delete an existing Aurora cluster, instance, and parameter group
 ```bash
-bin/aurora-vs-TiDB --action=delete --cluster-id=Aurora-v3060-r6g4xl --instance-id=Aurora-v3060-r6g4xl-instance --param-group-name=my-custom-aurora-mysql80
+bin/aurora-vs-TiDB --action=delete-rds --cluster-id=Aurora-v3060-r6g4xl --instance-id=Aurora-v3060-r6g4xl-instance --param-group-name=my-custom-aurora-mysql80
 ```
 
 #### Create an EC2 Client Instance

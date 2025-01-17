@@ -259,7 +259,7 @@ func prepareSysbenchDataWithSSM(rdsClient *rds.Client, ssmClient *ssm.Client, ec
 	fmt.Printf("Prepare cmd: %s\n", prepareCmd)
 	keypair := fmt.Sprintf("./%s.pem", ec2KeyName)
 
-	err = sshCommandRealtime(ec2instanceID, keypair, prepareCmd)
+	err = sshCommandRealtime(ec2instanceID, keypair, prepareCmd, nil)
 	if err != nil {
 		return fmt.Errorf("failed to run sysbench prepare with SSH remote exec: %v", err)
 	}
@@ -322,7 +322,7 @@ func pollCommandInvocation(ssmClient *ssm.Client, commandID, instanceID string) 
 	return nil
 }
 
-func sshCommandRealtime(instanceID, sshKeyPath, command string) error {
+func sshCommandRealtime(instanceID, sshKeyPath, command string, resultsFile *os.File) error {
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
 		return fmt.Errorf("unable to load SDK config, %v", err)
@@ -353,13 +353,23 @@ func sshCommandRealtime(instanceID, sshKeyPath, command string) error {
 	go func() {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
-			fmt.Println("STDOUT:", scanner.Text())
+			if resultsFile != nil {
+				fmt.Println("STDOUT:", scanner.Text())
+				resultsFile.WriteString("STDOUT: " + scanner.Text() + "\n")
+			} else {
+				fmt.Println("STDOUT:", scanner.Text())
+			}
 		}
 	}()
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			fmt.Println("STDERR:", scanner.Text())
+			if resultsFile != nil {
+				fmt.Println("STDOUT:", scanner.Text())
+				resultsFile.WriteString("STDERR: " + scanner.Text() + "\n")
+			} else {
+				fmt.Println("STDERR:", scanner.Text())
+			}
 		}
 	}()
 
@@ -383,28 +393,35 @@ func RunSysbenchPerftest(rdsClient *rds.Client, ssmClient *ssm.Client, ec2instan
 		return fmt.Errorf("no DBCluster found with ID %s", clusterID)
 	}
 
-	// 获取 Cluster Endpoint 和 Port
+	// 获取 Cluster intancecluss Endpoint 和 Port
+	dbinstanceClass, err := getFirstAuroraInstanceClass(rdsClient, clusterID)
+	if err != nil {
+		return fmt.Errorf("failed to get aurora instance class: %v", err)
+
+	}
+	fmt.Printf("dbinstanceClass: %s\n", dbinstanceClass)
+
 	clusterEndpoint := dbClustersOutput.DBClusters[0].Endpoint
 	clusterPort := dbClustersOutput.DBClusters[0].Port
 
-	// 获取环境变量中的密码
-	masterPassword := os.Getenv("MASTER_PASSWORD")
-	if masterPassword == "" {
-		return fmt.Errorf("MASTER_PASSWORD environment variable is not set")
+	// 把命令测试结果放到results 目录夹下
+	testFile, err := createResultsFile(dbinstanceClass, testtype)
+	if err != nil {
+		return fmt.Errorf("faild to create test results file: %v", err)
 	}
 
 	threadsValues := []int{1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024}
 
 	for _, threads := range threadsValues {
 		runCMD := fmt.Sprintf(
-			"sysbench %s run --time=3600 --threads=%d --report-interval=10 --rand-type=uniform --mysql-db=sbtest --mysql-host=%s --mysql-port=%d --mysql-user=admin --mysql-password=%s --tables=50 --table-size=100000000 --mysql-ignore-errors=1062,2013,8028,9007",
-			testtype, threads, *clusterEndpoint, *clusterPort, masterPassword,
+			"sysbench %s run --time=300 --threads=%d --report-interval=10 --rand-type=uniform --mysql-db=sbtest --mysql-host=%s --mysql-port=%d --mysql-user=admin --mysql-password=%s --tables=50 --table-size=100000000 --mysql-ignore-errors=1062,2013,8028,9007",
+			testtype, threads, *clusterEndpoint, *clusterPort, os.Getenv("MASTER_PASSWORD"),
 		)
 
 		fmt.Printf("Run cmd: %s\n", runCMD)
 		keypair := fmt.Sprintf("./%s.pem", ec2KeyName)
 
-		err = sshCommandRealtime(ec2instanceID, keypair, runCMD)
+		err = sshCommandRealtime(ec2instanceID, keypair, runCMD, testFile)
 		if err != nil {
 			return fmt.Errorf("failed to run sysbench with SSH remote exec: %v", err)
 		}
@@ -413,4 +430,49 @@ func RunSysbenchPerftest(rdsClient *rds.Client, ssmClient *ssm.Client, ec2instan
 
 	fmt.Println("sysbench run totally completed successfully")
 	return nil
+}
+
+func getFirstAuroraInstanceClass(rdsClient *rds.Client, clusterID string) (string, error) {
+	// 获取 Aurora 集群的详细信息
+	describeDBClustersInput := &rds.DescribeDBClustersInput{
+		DBClusterIdentifier: &clusterID,
+	}
+	dbClustersOutput, err := rdsClient.DescribeDBClusters(context.TODO(), describeDBClustersInput)
+	if err != nil {
+		return "", fmt.Errorf("failed to describe DBClusters: %v", err)
+	}
+	if len(dbClustersOutput.DBClusters) == 0 {
+		return "", fmt.Errorf("no DBCluster found with ID %s", clusterID)
+	}
+
+	// 获取集群中的第一个实例 ID
+	dbCluster := dbClustersOutput.DBClusters[0]
+	if len(dbCluster.DBClusterMembers) == 0 {
+		return "", fmt.Errorf("no DB instances found in cluster %s", clusterID)
+	}
+	firstInstanceID := dbCluster.DBClusterMembers[0].DBInstanceIdentifier
+	if firstInstanceID == nil {
+		return "", fmt.Errorf("first DB instance identifier is nil in cluster %s", clusterID)
+	}
+
+	// 获取第一个实例的详细信息
+	describeDBInstancesInput := &rds.DescribeDBInstancesInput{
+		DBInstanceIdentifier: firstInstanceID,
+	}
+	dbInstancesOutput, err := rdsClient.DescribeDBInstances(context.TODO(), describeDBInstancesInput)
+	if err != nil {
+		return "", fmt.Errorf("failed to describe DB instance %s: %v", *firstInstanceID, err)
+	}
+	if len(dbInstancesOutput.DBInstances) == 0 {
+		return "", fmt.Errorf("no DB instance found with ID %s", *firstInstanceID)
+	}
+
+	// 获取第一个实例的机型信息
+	firstInstance := dbInstancesOutput.DBInstances[0]
+	instanceClass := firstInstance.DBInstanceClass
+	if instanceClass == nil {
+		return "", fmt.Errorf("DB instance class is nil for instance %s", *firstInstanceID)
+	}
+
+	return *instanceClass, nil
 }
