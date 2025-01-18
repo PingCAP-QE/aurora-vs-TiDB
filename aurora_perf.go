@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -15,74 +16,23 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/aws/aws-sdk-go/aws"
 )
 
-func initPerfTestEnv(ec2Client *ec2.Client, ssmClient *ssm.Client, instanceID string) error {
-	var inforkey = "InstanceIds"
+func initPerfTestEnv(ec2Client *ec2.Client, ec2InstanceID, ec2KeyName string) error {
 	// 检查实例状态
-	instanceState, err := getInstanceState(ec2Client, instanceID)
+	instanceState, err := getInstanceState(ec2Client, ec2InstanceID)
 	if err != nil {
 		return fmt.Errorf("failed to get instance state: %v", err)
 	}
 	if instanceState != "running" {
-		return fmt.Errorf("instance %s is not in a valid state: %s", instanceID, instanceState)
+		return fmt.Errorf("instance %s is not in a valid state: %s", ec2InstanceID, instanceState)
 	}
 	fmt.Printf("current instance status: %s\n", instanceState)
-
-	// 获取EC2实例的公共IP地址
-	publicIP, err := getPublicIP(ec2Client, instanceID)
-	if err != nil {
-		return fmt.Errorf("failed to get public IP: %v", err)
-	}
-	fmt.Printf("ec2 instance public IP: %s\n", publicIP)
-
-	// 检查 SSM Agent 状态
-	ssmInfo, err := ssmClient.DescribeInstanceInformation(context.TODO(), &ssm.DescribeInstanceInformationInput{
-		Filters: []types.InstanceInformationStringFilter{
-			{
-				Key:    &inforkey,
-				Values: []string{instanceID},
-			},
-		},
-	})
-	if err != nil {
-		log.Fatalf("Failed to describe instance information: %v", err)
-	}
-
-	// 如果 SSM Agent 未运行，尝试启动它
-	if len(ssmInfo.InstanceInformationList) == 0 {
-		// 给instance 实例附加上 SSM-role
-		roleARN := "arn:aws:iam::986330900858:instance-profile/ec2-ssm-role"
-
-		// 调用函数修改EC2实例的IAM角色
-		err := associateIamInstanceProfile(instanceID, roleARN)
-		if err != nil {
-			log.Fatalf("Failed to attach SSM role to %s: %v", instanceID, err)
-		}
-		fmt.Println("SSM Agent is not running. Attempting to start it...")
-		sshCommand := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no ec2-user@%s 'sudo systemctl start amazon-ssm-agent'", "./pub-st-rsa.pem", publicIP)
-		cmd := exec.Command("bash", "-c", sshCommand)
-		err = cmd.Run()
-		if err != nil {
-			log.Fatalf("Failed to start SSM Agent: %v", err)
-		}
-		fmt.Println("SSM Agent started successfully. Waiting for 30 seconds to ensure it's running...")
-		time.Sleep(30 * time.Second)
-	}
-	// 检查 SSM Agent 服务状态
-	statusCommand := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no ec2-user@%s 'sudo systemctl status amazon-ssm-agent'", "./pub-st-rsa.pem", publicIP)
-	statusCmd := exec.Command("bash", "-c", statusCommand)
-	output, err := statusCmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to check SSM Agent status: %v", err)
-	}
-	fmt.Println(string(output))
-
 	// 安装mysql-client和sysbench的命令
 	command := `
 sudo yum update -y &&
-sudo yum -y install git make automake libtool pkgconfig libaio-devel openssl-devel mysql-devel yum-utils mariadb.x86_64 -y &&
+sudo yum install -y git make automake libtool pkgconfig libaio-devel openssl-devel mysql-devel yum-utils mariadb.x86_64 &&
 sudo git clone https://github.com/akopytov/sysbench.git &&
 cd sysbench &&
 sudo sh autogen.sh &&
@@ -90,34 +40,38 @@ sudo sh configure &&
 sudo make -j4 &&
 sudo make install
 `
-	_, err = runSSMCommand(ssmClient, instanceID, command)
+	// 使用单引号包裹命令
+	command = fmt.Sprintf("'%s'", strings.ReplaceAll(command, "'", "'\"'\"'"))
+	keypair := fmt.Sprintf("./%s.pem", ec2KeyName)
+
+	err = sshCommandRealtime(ec2InstanceID, keypair, command, nil)
 	if err != nil {
-		return fmt.Errorf("failed to run SSM command: %v", err)
+		return fmt.Errorf("failed to run command: %v", err)
 	}
 
-	fmt.Printf("mysql-client and sysbench installed on instance %s with IP %s\n", instanceID, publicIP)
+	fmt.Printf("mysql-client and sysbench installed on EC2 instance %s\n", ec2InstanceID)
 	return nil
 }
 
-func getPublicIP(ec2Client *ec2.Client, instanceID string) (string, error) {
+func getPublicDNS(ec2Client *ec2.Client, ec2InstanceID string) (string, error) {
 	// 获取EC2实例的详细信息
 	describeInstancesInput := &ec2.DescribeInstancesInput{
-		InstanceIds: []string{instanceID},
+		InstanceIds: []string{ec2InstanceID},
 	}
 	instancesOutput, err := ec2Client.DescribeInstances(context.TODO(), describeInstancesInput)
 	if err != nil {
 		return "", fmt.Errorf("failed to describe instances: %v", err)
 	}
 	if len(instancesOutput.Reservations) == 0 || len(instancesOutput.Reservations[0].Instances) == 0 {
-		return "", fmt.Errorf("no instance found with ID %s", instanceID)
+		return "", fmt.Errorf("no instance found with ID %s", ec2InstanceID)
 	}
 
 	// 获取公共IP地址
-	publicIP := instancesOutput.Reservations[0].Instances[0].PublicIpAddress
-	if publicIP == nil {
-		return "", fmt.Errorf("public IP address not found for instance %s", instanceID)
+	publicDNS := instancesOutput.Reservations[0].Instances[0].PublicDnsName
+	if publicDNS == nil {
+		return "", fmt.Errorf("public DNS name not found for instance %s", ec2InstanceID)
 	}
-	return *publicIP, nil
+	return *publicDNS, nil
 }
 
 func runSSMCommand(ssmClient *ssm.Client, instanceID, command string) (*ssm.SendCommandOutput, error) {
@@ -213,7 +167,7 @@ func associateIamInstanceProfile(instanceID, roleARN string) error {
 	return nil
 }
 
-func prepareSysbenchDataWithSSM(rdsClient *rds.Client, ssmClient *ssm.Client, ec2instanceID, clusterID, ec2KeyName string) error {
+func prepareSysbenchData(rdsClient *rds.Client, ec2instanceID, clusterID, ec2KeyName string) error {
 
 	// 获取Aurora集群的详细信息
 	describeDBClustersInput := &rds.DescribeDBClustersInput{
@@ -232,22 +186,18 @@ func prepareSysbenchDataWithSSM(rdsClient *rds.Client, ssmClient *ssm.Client, ec
 	// 获取Cluster Endpoint
 	clusterEndpoint := dbClustersOutput.DBClusters[0].Endpoint
 	clusterPort := dbClustersOutput.DBClusters[0].Port
+	keypair := fmt.Sprintf("./%s.pem", ec2KeyName)
 
 	// 构建sbtest create SQL 命令
-	sqlCmd := fmt.Sprintf(
+	dropCmd := fmt.Sprintf(
 		"mysql -u admin -p%s -h %s -P %d -e 'DROP DATABASE IF EXISTS sbtest; CREATE DATABASE sbtest;'",
 		os.Getenv("MASTER_PASSWORD"), *clusterEndpoint, *clusterPort,
 	)
-	fmt.Printf("Drop cmd: %s\n", sqlCmd)
+	fmt.Printf("Drop cmd: %s\n", dropCmd)
 
-	sendCommandOutput, err := runSSMCommand(ssmClient, ec2instanceID, sqlCmd)
+	err = sshCommandRealtime(ec2instanceID, keypair, dropCmd, nil)
 	if err != nil {
-		return fmt.Errorf("failed to run SQL commands with SSM: %v", err)
-	}
-	commandID := *sendCommandOutput.Command.CommandId
-	err = pollCommandInvocation(ssmClient, commandID, ec2instanceID)
-	if err != nil {
-		return fmt.Errorf("error polling command invocation: %v", err)
+		return fmt.Errorf("failed to run sysbench prepare with SSH remote exec: %v", err)
 	}
 
 	// 构建 sysbench 命令
@@ -257,7 +207,6 @@ func prepareSysbenchDataWithSSM(rdsClient *rds.Client, ssmClient *ssm.Client, ec
 	)
 
 	fmt.Printf("Prepare cmd: %s\n", prepareCmd)
-	keypair := fmt.Sprintf("./%s.pem", ec2KeyName)
 
 	err = sshCommandRealtime(ec2instanceID, keypair, prepareCmd, nil)
 	if err != nil {
@@ -329,13 +278,15 @@ func sshCommandRealtime(instanceID, sshKeyPath, command string, resultsFile *os.
 	}
 
 	ec2Client := ec2.NewFromConfig(cfg)
-	publicIP, err := getPublicIP(ec2Client, instanceID)
+	publicNDS, err := getPublicDNS(ec2Client, instanceID)
 	if err != nil {
 		return fmt.Errorf("failed to get public IP: %v", err)
 	}
 
 	sshUser := "ec2-user" // 默认的 EC2 用户名，根据您的 AMI 可能需要调整
-	sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no %s@%s %s", sshKeyPath, sshUser, publicIP, command)
+	sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no %s@%s %s", sshKeyPath, sshUser, publicNDS, command)
+	fmt.Printf("Exec cmd: %s\n", sshCmd)
+
 	cmd := exec.Command("bash", "-c", sshCmd)
 
 	stdout, err := cmd.StdoutPipe()
@@ -353,22 +304,27 @@ func sshCommandRealtime(instanceID, sshKeyPath, command string, resultsFile *os.
 	go func() {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
+			timestamp := time.Now().Format("2006-01-02 15:04:05")
+			output := fmt.Sprintf("[%s STDOUT]: %s", timestamp, scanner.Text())
 			if resultsFile != nil {
-				fmt.Println("STDOUT:", scanner.Text())
-				resultsFile.WriteString("STDOUT: " + scanner.Text() + "\n")
+				fmt.Println(output)
+				resultsFile.WriteString(output + "\n")
 			} else {
-				fmt.Println("STDOUT:", scanner.Text())
+				fmt.Println(output)
 			}
 		}
 	}()
+
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
+			timestamp := time.Now().Format("2006-01-02 15:04:05")
+			output := fmt.Sprintf("[%s STDERR]: %s", timestamp, scanner.Text())
 			if resultsFile != nil {
-				fmt.Println("STDOUT:", scanner.Text())
-				resultsFile.WriteString("STDERR: " + scanner.Text() + "\n")
+				fmt.Println(output)
+				resultsFile.WriteString(output + "\n")
 			} else {
-				fmt.Println("STDERR:", scanner.Text())
+				fmt.Println(output)
 			}
 		}
 	}()
@@ -475,4 +431,84 @@ func getFirstAuroraInstanceClass(rdsClient *rds.Client, clusterID string) (strin
 	}
 
 	return *instanceClass, nil
+}
+
+// RestoreAuroraClusterFromS3 从S3还原数据到已有的Aurora集群
+func RestoreAuroraClusterFromS3(s3BucketName, s3Prefix, clusterID, roleARN string) error {
+	masterUsername := "admin"
+	masterUserpassword := os.Getenv("MASTER_PASSWORD")
+	engineVersion := "8.0.mysql_aurora.3.06.1" // 使用正确的版本号
+	engine := "aurora-mysql"
+	cfg, err := config.LoadDefaultConfig(context.TODO())
+	if err != nil {
+		log.Fatalf("Unable to load aws config(~/.aws/config), %v", err)
+	}
+	rdsSvc := rds.NewFromConfig(cfg)
+
+	params := &rds.RestoreDBClusterFromS3Input{
+		DBClusterIdentifier: aws.String(clusterID),
+		S3BucketName:        aws.String(s3BucketName),
+		S3IngestionRoleArn:  aws.String(roleARN),
+		S3Prefix:            aws.String(s3Prefix),
+		Engine:              aws.String(engine),
+		EngineVersion:       aws.String(engineVersion),
+		MasterUsername:      aws.String(masterUsername),
+		SourceEngine:        aws.String("mysql"),
+		SourceEngineVersion: aws.String("8.0.34"),
+		MasterUserPassword:  aws.String(masterUserpassword),
+	}
+
+	// 发送还原请求
+	resp, err := rdsSvc.RestoreDBClusterFromS3(context.TODO(), params)
+	if err != nil {
+		return fmt.Errorf("failed to restore data to Aurora %s: %v", clusterID, err)
+	}
+
+	// 轮询集群状态，直到恢复完成
+	for {
+		clusterStatus, err := CheckClusterStatus(clusterID)
+		if err != nil {
+			return fmt.Errorf("error checking cluster status: %v", err)
+		}
+
+		fmt.Printf("Cluster %s status: %s\n", clusterID, clusterStatus)
+
+		// 如果集群状态为 available，表示恢复完成
+		if clusterStatus == "available" {
+			fmt.Printf("Cluster %s is available and ready to use\n", clusterID)
+			break
+		}
+
+		// 如果不是可用状态，等待 30 秒后重试
+		time.Sleep(30 * time.Second)
+	}
+
+	fmt.Printf("successfully restore data to Aurora %s: %v\n", clusterID, resp)
+
+	return nil
+}
+
+// CheckClusterStatus 检查 Aurora 集群的状态
+func CheckClusterStatus(clusterID string) (string, error) {
+	cfg, err := config.LoadDefaultConfig(context.TODO())
+	if err != nil {
+		log.Fatalf("Unable to load AWS config (~/.aws/config), %v", err)
+	}
+	rdsSvc := rds.NewFromConfig(cfg)
+
+	// 请求获取 DB 集群信息
+	resp, err := rdsSvc.DescribeDBClusters(context.TODO(), &rds.DescribeDBClustersInput{
+		DBClusterIdentifier: aws.String(clusterID),
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to describe DB cluster: %v", err)
+	}
+
+	if len(resp.DBClusters) == 0 {
+		return "", fmt.Errorf("no DB cluster found with ID: %s", clusterID)
+	}
+
+	// 获取集群状态
+	clusterStatus := aws.StringValue(resp.DBClusters[0].Status)
+	return clusterStatus, nil
 }

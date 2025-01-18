@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	rdstype "github.com/aws/aws-sdk-go-v2/service/rds/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	"github.com/aws/smithy-go"
 
 	"github.com/spf13/pflag"
 )
@@ -25,19 +27,20 @@ func isValidParamGroupName(name string) bool {
 }
 
 func main() {
-	// 定义命令行参数
-	var action string
-	var clusterID string
-	var instanceID string
-	var paramGroupName string
-	var dbInstanceClass string
-	var ec2InstanceType string
-	var ec2ImageID string
-	var ec2InstanceID string
-	var ec2SecurityGroupID string
-	var ec2KeyName string
-	var ec2SubnetID string
-	var perfType string
+	var (
+		action             string
+		clusterID          string
+		instanceID         string
+		paramGroupName     string
+		dbInstanceClass    string
+		ec2InstanceType    string
+		ec2ImageID         string
+		ec2InstanceID      string
+		ec2SecurityGroupID string
+		ec2KeyName         string
+		perfType           string
+		restore            bool
+	)
 
 	pflag.StringVarP(&action, "action", "a", "", "Action to perform: 'create-rds', 'delete-rds', 'modify-params', 'create-client', 'delete-client','init-perftest-env','prepare-data'")
 	pflag.StringVarP(&clusterID, "cluster-id", "c", "", "Aurora cluster identifier")
@@ -47,9 +50,9 @@ func main() {
 	pflag.StringVarP(&ec2InstanceType, "ec2-instance-type", "t", "m5.2xlarge", "EC2 instance type (default: m5.2xlarge)")
 	pflag.StringVarP(&ec2ImageID, "ec2-image-id", "m", "ami-0afb6e8e0625142bc", "EC2 image ID (default: ami-0afb6e8e0625142bc)") // amazone linux 2023 ami-id:ami-046d7944dd9e73a61 for default
 	pflag.StringVarP(&ec2InstanceID, "ec2-instance-id", "e", "", "EC2 instance ID")                                              // like  i-0596d9ed0e24f825d
-	pflag.StringVarP(&ec2SubnetID, "ec2-subnet-id", "s", "", "EC2 subnet ID")
 	pflag.StringVarP(&ec2SecurityGroupID, "ec2-security-group-id", "g", "", "EC2 security group ID")
 	pflag.StringVarP(&ec2KeyName, "ec2-key-name", "k", "pub-st-rsa", "EC2 key pair name(default: pub-st-rsa)")
+	pflag.BoolVarP(&restore, "restore", "s", false, "Restore data from S3 instead of preparing data with Sysbench, create a new cluster")
 	pflag.StringVarP(&perfType, "perf-type", "o", "", "Sysbench oltp perf type:oltp_read_only/oltp_read_write/oltp_write_only")
 
 	pflag.Parse()
@@ -69,7 +72,7 @@ func main() {
 	// 加载AWS配置
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
-		log.Fatalf("Unable to load SDK config, %v", err)
+		log.Fatalf("Unable to load aws config(~/.aws/config), %v", err)
 	}
 
 	// 创建RDS/ec2/ssm客户端
@@ -125,7 +128,7 @@ func main() {
 		if ec2InstanceID == "" {
 			log.Fatalf("For 'init-perftest-env' action, --ec2-instance-id is required")
 		}
-		err := initPerfTestEnv(ec2Client, ssmClient, ec2InstanceID)
+		err := initPerfTestEnv(ec2Client, ec2InstanceID, ec2KeyName)
 		if err != nil {
 			log.Fatalf("Failed to initialize performance test environment: %v", err)
 		}
@@ -134,17 +137,26 @@ func main() {
 		if ec2InstanceID == "" || clusterID == "" {
 			log.Fatalf("For 'prepare-data' action, --ec2-instance-id and --cluster-id are required")
 		}
-		err := prepareSysbenchDataWithSSM(rdsClient, ssmClient, ec2InstanceID, clusterID, ec2KeyName)
-		if err != nil {
-			log.Fatalf("Prepare data Error: %v\n", err)
+		if restore {
+			err := RestoreAuroraClusterFromS3("qa-drill-bkt", "", clusterID, "arn:aws:iam::986330900858:role/asystest")
+			if err != nil {
+				log.Fatalf("Prapare data from s3 failed: %v", err)
+			}
+
+		} else {
+			err := prepareSysbenchData(rdsClient, ec2InstanceID, clusterID, ec2KeyName)
+			if err != nil {
+				log.Fatalf("Prepare data from sysbench preapare Error: %v", err)
+			}
 		}
+
 	case "perftest-run":
 		if ec2InstanceID == "" || clusterID == "" || perfType == "" {
 			log.Fatalf("For 'perftest-run' action, --ec2-instance-id,--cluster-id and --perf-type are required")
 		}
 		err := RunSysbenchPerftest(rdsClient, ssmClient, ec2InstanceID, clusterID, ec2KeyName, perfType)
 		if err != nil {
-			log.Fatalf("Run sysbench perftest Error: %v\n", err)
+			log.Fatalf("Run sysbench perftest Error: %v", err)
 		}
 	default:
 		log.Fatalf("Invalid action: %s. Use 'create-rds', 'delete-rds', 'modify-params', 'create-client','init-perftest-env','prepare-data','perftest-run'", action)
@@ -204,6 +216,13 @@ func createResources(client *rds.Client, clusterID, instanceID, paramGroupName, 
 
 	_, err = client.CreateDBClusterParameterGroup(context.TODO(), createParamGroupInput)
 	if err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) {
+			if apiErr.ErrorCode() == "DBClusterParameterGroupAlreadyExistsFault" {
+				fmt.Printf("Parameter group %s already exists.\n", paramGroupName)
+			}
+			return
+		}
 		log.Fatalf("Failed to create DBClusterParameterGroup, %v", err)
 	}
 	fmt.Printf("DBClusterParameterGroup created: %s\n", paramGroupName)
