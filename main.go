@@ -15,6 +15,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	rdstype "github.com/aws/aws-sdk-go-v2/service/rds/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/smithy-go"
 
 	"github.com/spf13/pflag"
@@ -138,7 +140,7 @@ func main() {
 			log.Fatalf("For 'prepare-data' action, --ec2-instance-id and --cluster-id are required")
 		}
 		if restore {
-			err := RestoreAuroraClusterFromS3("qa-drill-bkt", "", clusterID, "arn:aws:iam::986330900858:role/asystest")
+			err := RestoreAuroraClusterFromS3("qa-drill-bkt", "sysbench-1e-1t", clusterID, "arn:aws:iam::986330900858:role/asystest", paramGroupName)
 			if err != nil {
 				log.Fatalf("Prapare data from s3 failed: %v", err)
 			}
@@ -190,6 +192,27 @@ func createResources(client *rds.Client, clusterID, instanceID, paramGroupName, 
 	if err != nil {
 		log.Fatalf("Failed to create Aurora cluster, %v", err)
 	}
+
+	// 轮询集群状态，直到状态为 available 表示创建完成，超时时间10分钟
+	startTime := time.Now()
+	retries := 0
+	for {
+		clusterStatus, err := CheckClusterStatus(clusterID)
+		if err != nil {
+			log.Fatalf("error checking cluster status: %v", err)
+		}
+
+		fmt.Printf("Cluster %s status: %s\n", clusterID, clusterStatus)
+
+		if clusterStatus == "available" || retries == 60 {
+			duration := time.Since(startTime)
+			fmt.Printf("Cluster %s is available and ready to use, time cost: %v\n", clusterID, duration)
+			break
+		}
+		retries++
+
+		time.Sleep(10 * time.Second)
+	}
 	fmt.Printf("Aurora cluster created: %v\n", createClusterOutput)
 
 	// 创建Aurora数据库实例
@@ -205,27 +228,59 @@ func createResources(client *rds.Client, clusterID, instanceID, paramGroupName, 
 	if err != nil {
 		log.Fatalf("Failed to create Aurora instance, %v", err)
 	}
-	fmt.Printf("Aurora instance created: %v\n", createInstanceOutput)
 
-	// 创建新的参数组
-	createParamGroupInput := &rds.CreateDBClusterParameterGroupInput{
-		DBClusterParameterGroupName: &paramGroupName,
-		Description:                 &paramterDescription,
-		DBParameterGroupFamily:      &parameterGroupFamily,
+	// 轮询实例状态，直到状态为 available 表示创建完成，超时时间10分钟
+	retries = 0
+	startTime = time.Now()
+	for {
+		instanceStatus, err := CheckDBInstanceStatus(instanceID)
+		if err != nil {
+			log.Fatalf("error checking cluster instance status: %v", err)
+		}
+
+		fmt.Printf("Cluster instance %s status: %s\n", instanceID, instanceStatus)
+
+		if instanceStatus == "available" || retries == 60 {
+			duration := time.Since(startTime)
+			fmt.Printf("Cluster instance %s is available and ready to use, time cost: %v\n", instanceID, duration)
+			break
+		}
+		retries++
+
+		time.Sleep(10 * time.Second)
 	}
 
-	_, err = client.CreateDBClusterParameterGroup(context.TODO(), createParamGroupInput)
+	fmt.Printf("Aurora instance created: %v\n", createInstanceOutput)
+
+	err = CreateDBClusterParameterGroup(client, paramGroupName, paramterDescription, parameterGroupFamily)
 	if err != nil {
+		log.Fatalf("Failed to create Aurora cluster parameter group, %v", err)
+	}
+	fmt.Printf("DBClusterParameterGroup created: %s\n", paramGroupName)
+}
+
+// CreateDBClusterParameterGroup 创建 DBCluster 参数组
+func CreateDBClusterParameterGroup(client *rds.Client, paramGroupName, paramterDescription, parameterGroupFamily string) error {
+	createParamGroupInput := &rds.CreateDBClusterParameterGroupInput{
+		DBClusterParameterGroupName: aws.String(paramGroupName),
+		Description:                 aws.String(paramterDescription),
+		DBParameterGroupFamily:      aws.String(parameterGroupFamily),
+	}
+
+	_, err := client.CreateDBClusterParameterGroup(context.TODO(), createParamGroupInput)
+	if err != nil {
+		// 处理错误，检查是否已经存在
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) {
 			if apiErr.ErrorCode() == "DBClusterParameterGroupAlreadyExistsFault" {
 				fmt.Printf("Parameter group %s already exists.\n", paramGroupName)
+				return nil // 如果已存在，直接返回
 			}
-			return
 		}
-		log.Fatalf("Failed to create DBClusterParameterGroup, %v", err)
+		return err
 	}
-	fmt.Printf("DBClusterParameterGroup created: %s\n", paramGroupName)
+
+	return nil
 }
 
 func modifyClusterParameters(client *rds.Client, clusterID, paramGroupName string) {
@@ -273,8 +328,32 @@ func deleteResources(client *rds.Client, clusterID, instanceID, paramGroupName s
 
 	_, err := client.DeleteDBInstance(context.TODO(), deleteInstanceInput)
 	if err != nil {
-		log.Fatalf("Failed to delete Aurora instance, %v", err)
+		var aerr awserr.Error
+		if errors.As(err, &aerr) && aerr.Code() != "DBInstanceNotFound" {
+			log.Fatalf("Failed to delete Aurora instance, %v", err)
+		}
 	}
+
+	// 轮询实例状态，直到状态为 deleted 表示创建完成，超时时间20分钟
+	startTime := time.Now()
+	retries := 0
+	for {
+		instanceStatus, err := CheckDBInstanceStatus(instanceID)
+		if err != nil {
+			log.Fatalf("error checking cluster instance status: %v", err)
+		}
+
+		fmt.Printf("Cluster instance %s status: %s\n", instanceID, instanceStatus)
+
+		if instanceStatus == "deleted" || retries == 120 {
+			duration := time.Since(startTime)
+			fmt.Printf("Cluster instance %s is deleted, time cost: %v\n", instanceID, duration)
+			break
+		}
+		retries++
+		time.Sleep(10 * time.Second)
+	}
+
 	fmt.Printf("Aurora instance deleted: %v\n", instanceID)
 
 	// 删除Aurora集群
@@ -285,7 +364,30 @@ func deleteResources(client *rds.Client, clusterID, instanceID, paramGroupName s
 
 	_, err = client.DeleteDBCluster(context.TODO(), deleteClusterInput)
 	if err != nil {
-		log.Fatalf("Failed to delete Aurora cluster, %v", err)
+		var aerr awserr.Error
+		if errors.As(err, &aerr) && aerr.Code() != "DBClusterNotFoundFault" {
+			log.Fatalf("Failed to delete Aurora cluster, %v", err)
+		}
+	}
+
+	// 轮询集群状态，直到状态为 deleted 表示创建完成，超时时间10分钟
+	retries = 0
+	startTime = time.Now()
+	for {
+		clusterStatus, err := CheckClusterStatus(clusterID)
+		if err != nil {
+			log.Fatalf("error checking cluster status: %v", err)
+		}
+
+		fmt.Printf("Cluster %s status: %s\n", clusterID, clusterStatus)
+
+		if clusterStatus == "deleted" || retries == 120 {
+			duration := time.Since(startTime)
+			fmt.Printf("Cluster %s is deleted, time cost: %v\n", clusterID, duration)
+			break
+		}
+		retries++
+		time.Sleep(10 * time.Second)
 	}
 	fmt.Printf("Aurora cluster deleted: %v\n", clusterID)
 

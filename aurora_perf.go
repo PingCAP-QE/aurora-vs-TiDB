@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/smithy-go"
 )
 
 func initPerfTestEnv(ec2Client *ec2.Client, ec2InstanceID, ec2KeyName string) error {
@@ -434,11 +436,14 @@ func getFirstAuroraInstanceClass(rdsClient *rds.Client, clusterID string) (strin
 }
 
 // RestoreAuroraClusterFromS3 从S3还原数据到已有的Aurora集群
-func RestoreAuroraClusterFromS3(s3BucketName, s3Prefix, clusterID, roleARN string) error {
+func RestoreAuroraClusterFromS3(s3BucketName, s3Prefix, clusterID, roleARN, paramGroupName string) error {
 	masterUsername := "admin"
 	masterUserpassword := os.Getenv("MASTER_PASSWORD")
 	engineVersion := "8.0.mysql_aurora.3.06.1" // 使用正确的版本号
 	engine := "aurora-mysql"
+	parameterGroupFamily := "aurora-mysql8.0"
+	paramterDescription := "Custom parameter group for Aurora MySQL 8.0"
+
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
 		log.Fatalf("Unable to load aws config(~/.aws/config), %v", err)
@@ -485,6 +490,18 @@ func RestoreAuroraClusterFromS3(s3BucketName, s3Prefix, clusterID, roleARN strin
 
 	fmt.Printf("successfully restore data to Aurora %s: %v\n", clusterID, resp)
 
+	// 创建 paramtergroup
+	rdsClient := rds.NewFromConfig(cfg)
+
+	err = CreateDBClusterParameterGroup(rdsClient, paramGroupName, paramterDescription, parameterGroupFamily)
+	if err != nil {
+		log.Fatalf("Failed to create Aurora cluster parameter group, %v", err)
+	}
+	fmt.Printf("DBClusterParameterGroup created: %s\n", paramGroupName)
+
+	// 绑定 paramtergroup 并修改参数到restore的集群
+	modifyClusterParameters(rdsClient, clusterID, paramGroupName)
+
 	return nil
 }
 
@@ -492,15 +509,19 @@ func RestoreAuroraClusterFromS3(s3BucketName, s3Prefix, clusterID, roleARN strin
 func CheckClusterStatus(clusterID string) (string, error) {
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
-		log.Fatalf("Unable to load AWS config (~/.aws/config), %v", err)
+		return "", fmt.Errorf("unable to load AWS config (~/.aws/config), %v", err)
 	}
-	rdsSvc := rds.NewFromConfig(cfg)
+	rdsClient := rds.NewFromConfig(cfg)
 
 	// 请求获取 DB 集群信息
-	resp, err := rdsSvc.DescribeDBClusters(context.TODO(), &rds.DescribeDBClustersInput{
+	resp, err := rdsClient.DescribeDBClusters(context.TODO(), &rds.DescribeDBClustersInput{
 		DBClusterIdentifier: aws.String(clusterID),
 	})
 	if err != nil {
+		var opErr *smithy.OperationError
+		if errors.As(err, &opErr) && strings.Contains(opErr.Error(), "DBClusterNotFoundFault") {
+			return "deleted", nil
+		}
 		return "", fmt.Errorf("failed to describe DB cluster: %v", err)
 	}
 
@@ -511,4 +532,33 @@ func CheckClusterStatus(clusterID string) (string, error) {
 	// 获取集群状态
 	clusterStatus := aws.StringValue(resp.DBClusters[0].Status)
 	return clusterStatus, nil
+}
+
+// CheckDBInstanceStatus 检查 DB 实例的状态
+func CheckDBInstanceStatus(dbInstanceID string) (string, error) {
+	cfg, err := config.LoadDefaultConfig(context.TODO())
+	if err != nil {
+		return "", fmt.Errorf("unable to load AWS config (~/.aws/config), %v", err)
+	}
+	rdsClient := rds.NewFromConfig(cfg)
+	resp, err := rdsClient.DescribeDBInstances(context.TODO(), &rds.DescribeDBInstancesInput{
+		DBInstanceIdentifier: aws.String(dbInstanceID),
+	})
+
+	if err != nil {
+		var opErr *smithy.OperationError
+		if errors.As(err, &opErr) && strings.Contains(opErr.Error(), "DBInstanceNotFound") {
+			return "deleted", nil
+		}
+
+		return "", fmt.Errorf("failed to describe DB instance %s: %v", dbInstanceID, err)
+	}
+
+	if len(resp.DBInstances) == 0 {
+		return "", fmt.Errorf("no DB instance found with identifier: %s", dbInstanceID)
+	}
+
+	instanceStatus := aws.StringValue(resp.DBInstances[0].DBInstanceStatus)
+
+	return instanceStatus, nil
 }
