@@ -437,10 +437,7 @@ func getFirstAuroraInstanceClass(rdsClient *rds.Client, clusterID string) (strin
 
 // RestoreAuroraClusterFromS3 从S3还原数据到已有的Aurora集群
 func RestoreAuroraClusterFromS3(s3BucketName, s3Prefix, clusterID, roleARN, paramGroupName string) error {
-	masterUsername := "admin"
 	masterUserpassword := os.Getenv("MASTER_PASSWORD")
-	engineVersion := "8.0.mysql_aurora.3.06.1" // 使用正确的版本号
-	engine := "aurora-mysql"
 	parameterGroupFamily := "aurora-mysql8.0"
 	paramterDescription := "Custom parameter group for Aurora MySQL 8.0"
 
@@ -455,12 +452,14 @@ func RestoreAuroraClusterFromS3(s3BucketName, s3Prefix, clusterID, roleARN, para
 		S3BucketName:        aws.String(s3BucketName),
 		S3IngestionRoleArn:  aws.String(roleARN),
 		S3Prefix:            aws.String(s3Prefix),
-		Engine:              aws.String(engine),
-		EngineVersion:       aws.String(engineVersion),
-		MasterUsername:      aws.String(masterUsername),
 		SourceEngine:        aws.String("mysql"),
 		SourceEngineVersion: aws.String("8.0.34"),
-		MasterUserPassword:  aws.String(masterUserpassword),
+		Engine:              aws.String("aurora-mysql"),
+		//EngineVersion:       aws.String("8.0.mysql_aurora.3.06.1"),
+		MasterUsername:     aws.String("admin"),
+		MasterUserPassword: aws.String(masterUserpassword),
+		StorageEncrypted:   aws.Bool(true),
+		KmsKeyId:           aws.String("arn:aws:kms:us-west-2:986330900858:key/0211dfe7-9583-408b-bd10-3d339906c08a"),
 	}
 
 	// 发送还原请求
@@ -469,30 +468,28 @@ func RestoreAuroraClusterFromS3(s3BucketName, s3Prefix, clusterID, roleARN, para
 		return fmt.Errorf("failed to restore data to Aurora %s: %v", clusterID, err)
 	}
 
-	// 轮询集群状态，直到恢复完成
+	// 轮询集群状态，直到恢复完成, 超时时间2h
+	retries := 0
+	startTime := time.Now()
 	for {
 		clusterStatus, err := CheckClusterStatus(clusterID)
 		if err != nil {
 			return fmt.Errorf("error checking cluster status: %v", err)
 		}
-
 		fmt.Printf("Cluster %s status: %s\n", clusterID, clusterStatus)
 
-		// 如果集群状态为 available，表示恢复完成
-		if clusterStatus == "available" {
-			fmt.Printf("Cluster %s is available and ready to use\n", clusterID)
+		if clusterStatus == "available" || retries == 240 {
+			duration := time.Since(startTime)
+			fmt.Printf("Cluster %s is available and ready to use, cost time: %s\n", clusterID, duration)
 			break
 		}
-
-		// 如果不是可用状态，等待 30 秒后重试
+		retries++
 		time.Sleep(30 * time.Second)
 	}
-
 	fmt.Printf("successfully restore data to Aurora %s: %v\n", clusterID, resp)
 
 	// 创建 paramtergroup
 	rdsClient := rds.NewFromConfig(cfg)
-
 	err = CreateDBClusterParameterGroup(rdsClient, paramGroupName, paramterDescription, parameterGroupFamily)
 	if err != nil {
 		log.Fatalf("Failed to create Aurora cluster parameter group, %v", err)
@@ -561,4 +558,90 @@ func CheckDBInstanceStatus(dbInstanceID string) (string, error) {
 	instanceStatus := aws.StringValue(resp.DBInstances[0].DBInstanceStatus)
 
 	return instanceStatus, nil
+}
+
+// ModifyAuroraClusterPassword 修改Aurora MySQL集群的主用户密码
+func ModifyAuroraClusterPassword(rdsSvc *rds.Client, clusterID, newMasterPassword string) error {
+	params := &rds.ModifyDBClusterInput{
+		DBClusterIdentifier: aws.String(clusterID),
+		MasterUserPassword:  aws.String(newMasterPassword),
+	}
+	_, err := rdsSvc.ModifyDBCluster(context.TODO(), params)
+	if err != nil {
+		return fmt.Errorf("failed to modify Aurora cluster %s password: %v", clusterID, err)
+	}
+	fmt.Printf("Successfully modified password for Aurora cluster %s\n", clusterID)
+	return nil
+}
+
+// RestoreAuroraClusterFromSnapshot 从database snapshot还原数据到新建的Aurora集群
+func RestoreAuroraClusterFromSnapshot(clusterID, snapshotID, dbInstanceClass, paramGroupName string) error {
+	masterUserpassword := os.Getenv("MASTER_PASSWORD")
+	parameterGroupFamily := "aurora-mysql8.0"
+	paramterDescription := "Custom parameter group for Aurora MySQL 8.0"
+
+	cfg, err := config.LoadDefaultConfig(context.TODO())
+	if err != nil {
+		log.Fatalf("Unable to load aws config(~/.aws/config), %v", err)
+	}
+	rdsSvc := rds.NewFromConfig(cfg)
+
+	params := &rds.RestoreDBClusterFromSnapshotInput{
+		DBClusterIdentifier: aws.String(clusterID),
+		Engine:              aws.String("aurora-mysql"),
+		EngineVersion:       aws.String("8.0.mysql_aurora.3.06.1"),
+		SnapshotIdentifier:  aws.String(snapshotID),
+		KmsKeyId:            aws.String("arn:aws:kms:us-west-2:986330900858:key/fba177a3-e2d3-45bb-848e-79c586376a45"),
+		//DBClusterInstanceClass: aws.String(dbInstanceClass),
+	}
+
+	// 发送还原请求，然后创建cluster的instance
+	resp, err := rdsSvc.RestoreDBClusterFromSnapshot(context.TODO(), params)
+	if err != nil {
+		return fmt.Errorf("failed to restore from snapshot %s to Aurora cluster %s: %v", snapshotID, clusterID, err)
+	}
+	dbInstanceID := fmt.Sprintf("%s-instance", clusterID)
+	err = CreateDBInstanceForCluster(clusterID, dbInstanceID, dbInstanceClass)
+	if err != nil {
+		log.Fatalf("failed to create database instance: %v\n", err)
+	}
+
+	// 轮询集群状态，直到恢复完成, 超时时间2h
+	retries := 0
+	startTime := time.Now()
+	for {
+		clusterStatus, err := CheckClusterStatus(clusterID)
+		if err != nil {
+			return fmt.Errorf("error checking cluster status: %v", err)
+		}
+		fmt.Printf("Cluster %s status: %s\n", clusterID, clusterStatus)
+
+		if clusterStatus == "available" || retries == 240 {
+			duration := time.Since(startTime)
+			fmt.Printf("Cluster %s is available and ready to use, cost time: %s\n", clusterID, duration)
+			break
+		}
+		retries++
+		time.Sleep(30 * time.Second)
+	}
+	fmt.Printf("successfully restore data to Aurora %s: %v\n", clusterID, resp)
+
+	// 修改主用户密码
+	err = ModifyAuroraClusterPassword(rdsSvc, clusterID, masterUserpassword)
+	if err != nil {
+		return fmt.Errorf("failed to modify master user password: %v", err)
+	}
+
+	// 创建 paramtergroup
+	rdsClient := rds.NewFromConfig(cfg)
+	err = CreateDBClusterParameterGroup(rdsClient, paramGroupName, paramterDescription, parameterGroupFamily)
+	if err != nil {
+		log.Fatalf("Failed to create Aurora cluster parameter group, %v", err)
+	}
+	fmt.Printf("DBClusterParameterGroup created: %s\n", paramGroupName)
+
+	// 绑定 paramtergroup 并修改参数到restore的集群
+	modifyClusterParameters(rdsClient, clusterID, paramGroupName)
+
+	return nil
 }

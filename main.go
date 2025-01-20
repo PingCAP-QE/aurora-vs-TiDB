@@ -136,16 +136,20 @@ func main() {
 		}
 		fmt.Println("Performance test environment initialized successfully")
 	case "prepare-data":
-		if ec2InstanceID == "" || clusterID == "" {
-			log.Fatalf("For 'prepare-data' action, --ec2-instance-id and --cluster-id are required")
-		}
 		if restore {
-			err := RestoreAuroraClusterFromS3("qa-drill-bkt", "sysbench-1e-1t", clusterID, "arn:aws:iam::986330900858:role/asystest", paramGroupName)
+			if clusterID == "" {
+				log.Fatalf("For 'prepare-data --restore' action,  --cluster-id is required")
+			}
+			//err := RestoreAuroraClusterFromS3("qa-drill-bkt", "mysql-snapshot-sysbench-3000w", clusterID, "arn:aws:iam::986330900858:role/asystest", paramGroupName)
+			err := RestoreAuroraClusterFromSnapshot(clusterID, "arn:aws:rds:us-west-2:986330900858:snapshot:snapshot-msyql-sysbench-1e1t", dbInstanceClass, paramGroupName)
 			if err != nil {
-				log.Fatalf("Prapare data from s3 failed: %v", err)
+				log.Fatalf("Prapare data from snapshot failed: %v", err)
 			}
 
 		} else {
+			if ec2InstanceID == "" || clusterID == "" {
+				log.Fatalf("For 'prepare-data' action, --ec2-instance-id and --cluster-id are required")
+			}
 			err := prepareSysbenchData(rdsClient, ec2InstanceID, clusterID, ec2KeyName)
 			if err != nil {
 				log.Fatalf("Prepare data from sysbench preapare Error: %v", err)
@@ -172,7 +176,7 @@ func createResources(client *rds.Client, clusterID, instanceID, paramGroupName, 
 	// 定义Aurora集群和实例的参数
 	masterUsername := "admin"
 	dbName := "mydb"
-	engineVersion := "8.0.mysql_aurora.3.06.0" // 使用正确的版本号
+	engineVersion := "8.0.mysql_aurora.3.07.0" // 使用正确的版本号
 	engine := "aurora-mysql"
 	parameterGroupFamily := "aurora-mysql8.0"
 	paramterDescription := "Custom parameter group for Aurora MySQL 8.0"
@@ -259,6 +263,32 @@ func createResources(client *rds.Client, clusterID, instanceID, paramGroupName, 
 	fmt.Printf("DBClusterParameterGroup created: %s\n", paramGroupName)
 }
 
+func CreateDBInstanceForCluster(clusterID, instanceID, instanceClass string) error {
+	// 加载默认配置
+	cfg, err := config.LoadDefaultConfig(context.TODO())
+	if err != nil {
+		log.Fatalf("Unable to load aws config(~/.aws/config), %v", err)
+	}
+	rdsSvc := rds.NewFromConfig(cfg)
+
+	// 构建创建实例请求参数
+	params := &rds.CreateDBInstanceInput{
+		DBInstanceIdentifier: aws.String(instanceID),
+		DBClusterIdentifier:  aws.String(clusterID),
+		DBInstanceClass:      aws.String(instanceClass),
+		Engine:               aws.String("aurora-mysql"),
+	}
+
+	// 发送创建实例请求
+	resp, err := rdsSvc.CreateDBInstance(context.TODO(), params)
+	if err != nil {
+		return fmt.Errorf("failed to create DB instance %s for cluster %s: %v", instanceID, clusterID, err)
+	}
+
+	fmt.Printf("Successfully created DB instance %s for cluster %s: %v\n", instanceID, clusterID, resp)
+	return nil
+}
+
 // CreateDBClusterParameterGroup 创建 DBCluster 参数组
 func CreateDBClusterParameterGroup(client *rds.Client, paramGroupName, paramterDescription, parameterGroupFamily string) error {
 	createParamGroupInput := &rds.CreateDBClusterParameterGroupInput{
@@ -266,7 +296,6 @@ func CreateDBClusterParameterGroup(client *rds.Client, paramGroupName, paramterD
 		Description:                 aws.String(paramterDescription),
 		DBParameterGroupFamily:      aws.String(parameterGroupFamily),
 	}
-
 	_, err := client.CreateDBClusterParameterGroup(context.TODO(), createParamGroupInput)
 	if err != nil {
 		// 处理错误，检查是否已经存在
@@ -279,7 +308,6 @@ func CreateDBClusterParameterGroup(client *rds.Client, paramGroupName, paramterD
 		}
 		return err
 	}
-
 	return nil
 }
 
