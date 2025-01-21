@@ -5,7 +5,7 @@ GO ?= go
 
 # Build settings
 BUILD_DIR ?= ./bin
-MAIN_SRC ?= main.go aurora_perf.go results.go
+MAIN_SRC ?= main.go aurora_perf.go results.go role.go
 MAIN_BIN ?= $(BUILD_DIR)/aurora-vs-TiDB
 GOOS=linux 
 GOARCH=amd64

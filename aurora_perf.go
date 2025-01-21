@@ -592,6 +592,7 @@ func RestoreAuroraClusterFromSnapshot(clusterID, snapshotID, dbInstanceClass, pa
 		EngineVersion:       aws.String("8.0.mysql_aurora.3.06.1"),
 		SnapshotIdentifier:  aws.String(snapshotID),
 		KmsKeyId:            aws.String("arn:aws:kms:us-west-2:986330900858:key/fba177a3-e2d3-45bb-848e-79c586376a45"),
+		StorageType:         aws.String("aurora-iopt1"), // aurora i-o optimized type
 		//DBClusterInstanceClass: aws.String(dbInstanceClass),
 	}
 
@@ -606,25 +607,46 @@ func RestoreAuroraClusterFromSnapshot(clusterID, snapshotID, dbInstanceClass, pa
 		log.Fatalf("failed to create database instance: %v\n", err)
 	}
 
-	// 轮询集群状态，直到恢复完成, 超时时间2h
+	// 轮询集群状态，直到恢复完成, 超时时间3h
 	retries := 0
-	startTime := time.Now()
+	startTime1 := time.Now()
 	for {
 		clusterStatus, err := CheckClusterStatus(clusterID)
 		if err != nil {
 			return fmt.Errorf("error checking cluster status: %v", err)
 		}
-		fmt.Printf("Cluster %s status: %s\n", clusterID, clusterStatus)
+		fmt.Printf("Cluster %s status: %s. Polling cycle: %d\n", clusterID, clusterStatus, retries+1)
 
-		if clusterStatus == "available" || retries == 240 {
-			duration := time.Since(startTime)
+		if clusterStatus == "available" || retries == 360 {
+			duration := time.Since(startTime1)
 			fmt.Printf("Cluster %s is available and ready to use, cost time: %s\n", clusterID, duration)
 			break
 		}
 		retries++
 		time.Sleep(30 * time.Second)
 	}
-	fmt.Printf("successfully restore data to Aurora %s: %v\n", clusterID, resp)
+
+	// 继续轮询实例状态，直到状态为 available 表示migrate完成，超时时间1h
+	startTime2 := time.Now()
+	retries = 0
+	for {
+		instanceStatus, err := CheckDBInstanceStatus(dbInstanceID)
+		if err != nil {
+			log.Fatalf("error checking cluster instance status: %v", err)
+		}
+
+		fmt.Printf("Cluster instance %s status: %s. Polling cycle: %d\n\n", dbInstanceID, instanceStatus, retries+1)
+
+		if instanceStatus == "available" || retries == 120 {
+			duration := time.Since(startTime2)
+			fmt.Printf("Cluster instance %s is available, time cost: %v\n", dbInstanceID, duration)
+			break
+		}
+		retries++
+		time.Sleep(30 * time.Second)
+	}
+
+	fmt.Printf("successfully restore data to Aurora %s: %v, total restore cost time: %v\n", clusterID, resp, time.Since(startTime1))
 
 	// 修改主用户密码
 	err = ModifyAuroraClusterPassword(rdsSvc, clusterID, masterUserpassword)

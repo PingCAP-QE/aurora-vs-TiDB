@@ -41,7 +41,10 @@ func main() {
 		ec2SecurityGroupID string
 		ec2KeyName         string
 		perfType           string
+		roleARN            string
 		restore            bool
+		//tokenExpiration    int32
+		roleSession string
 	)
 
 	pflag.StringVarP(&action, "action", "a", "", "Action to perform: 'create-rds', 'delete-rds', 'modify-params', 'create-client', 'delete-client','init-perftest-env','prepare-data'")
@@ -56,6 +59,10 @@ func main() {
 	pflag.StringVarP(&ec2KeyName, "ec2-key-name", "k", "pub-st-rsa", "EC2 key pair name(default: pub-st-rsa)")
 	pflag.BoolVarP(&restore, "restore", "s", false, "Restore data from S3 instead of preparing data with Sysbench, create a new cluster")
 	pflag.StringVarP(&perfType, "perf-type", "o", "", "Sysbench oltp perf type:oltp_read_only/oltp_read_write/oltp_write_only")
+	pflag.StringVarP(&roleARN, "role-arn", "r", "arn:aws:iam::986330900858:role/full-manager-service-role", "aws login account roleARN (default: arn:aws:iam::986330900858:role/full-manager-service-role)")
+	pflag.StringVarP(&roleSession, "role-session", "n", "full-manager-service-role", "aws login account roleA session name (default: full-manager-service-role)")
+
+	//pflag.Int32(&tokenExpiration, "token-expiration", 36000, "aws roleARN credentials expiration")
 
 	pflag.Parse()
 
@@ -164,8 +171,37 @@ func main() {
 		if err != nil {
 			log.Fatalf("Run sysbench perftest Error: %v", err)
 		}
+	case "assume-role":
+		if roleSession == "" {
+			log.Fatal("For 'assume-role' action, --role-session is required")
+		}
+		_, err := assumeRole(roleARN, "full-manager-service-role", 3600)
+		if err != nil {
+			log.Fatalf("failed to asume role: %v\n", err)
+		}
+		// 每隔10分钟调用AssumeRole获取新的临时凭证
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				// 获取新的临时凭证,将新的临时凭证写入 ~/.aws/credentials 文件
+				creds, err := assumeRole(roleARN, roleSession, 3600)
+				if err != nil {
+					log.Printf("Error renewing credentials: %v\n", err)
+					continue
+				}
+				err = WriteCredentialsToFile(creds)
+				if err != nil {
+					log.Printf("Error writing credentials to file: %v\n", err)
+					continue
+				}
+				log.Printf("Credentials renewed. New expiration: %s\n", creds.Expiration)
+			}
+		}
 	default:
-		log.Fatalf("Invalid action: %s. Use 'create-rds', 'delete-rds', 'modify-params', 'create-client','init-perftest-env','prepare-data','perftest-run'", action)
+		log.Fatalf("Invalid action: %s. Use 'create-rds', 'delete-rds', 'modify-params', 'create-client','init-perftest-env','prepare-data','perftest-run', 'assume-role'", action)
 	}
 }
 
@@ -176,7 +212,7 @@ func createResources(client *rds.Client, clusterID, instanceID, paramGroupName, 
 	// 定义Aurora集群和实例的参数
 	masterUsername := "admin"
 	dbName := "mydb"
-	engineVersion := "8.0.mysql_aurora.3.07.0" // 使用正确的版本号
+	engineVersion := "8.0.mysql_aurora.3.06.1" // 使用正确的版本号
 	engine := "aurora-mysql"
 	parameterGroupFamily := "aurora-mysql8.0"
 	paramterDescription := "Custom parameter group for Aurora MySQL 8.0"
