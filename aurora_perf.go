@@ -23,9 +23,9 @@ import (
 	"github.com/aws/smithy-go"
 )
 
-func initPerfTestEnv(ec2Client *ec2.Client, ec2InstanceID, ec2KeyName string) error {
+func initPerfTestEnv(ctx context.Context, ec2Client *ec2.Client, ec2InstanceID, ec2KeyName string) error {
 	// 检查实例状态
-	instanceState, err := getInstanceState(ec2Client, ec2InstanceID)
+	instanceState, err := getInstanceState(ctx, ec2Client, ec2InstanceID)
 	if err != nil {
 		return fmt.Errorf("failed to get instance state: %v", err)
 	}
@@ -48,7 +48,7 @@ sudo make install
 	command = fmt.Sprintf("'%s'", strings.ReplaceAll(command, "'", "'\"'\"'"))
 	keypair := fmt.Sprintf("./%s.pem", ec2KeyName)
 
-	err = sshCommandRealtime(ec2InstanceID, keypair, command, nil)
+	err = sshCommandRealtime(ctx, ec2InstanceID, keypair, command, nil)
 	if err != nil {
 		return fmt.Errorf("failed to run command: %v", err)
 	}
@@ -57,7 +57,7 @@ sudo make install
 	return nil
 }
 
-func getPublicDNS(ec2Client *ec2.Client, ec2InstanceID string) (string, error) {
+func getPublicDNS(ctx context.Context, ec2Client *ec2.Client, ec2InstanceID string) (string, error) {
 	// 获取EC2实例的详细信息
 	describeInstancesInput := &ec2.DescribeInstancesInput{
 		InstanceIds: []string{ec2InstanceID},
@@ -95,11 +95,11 @@ func runSSMCommand(ssmClient *ssm.Client, instanceID, command string) (*ssm.Send
 	return sendCommandOutput, nil
 }
 
-func getInstanceState(ec2Client *ec2.Client, instanceID string) (string, error) {
+func getInstanceState(ctx context.Context, ec2Client *ec2.Client, instanceID string) (string, error) {
 	describeInstancesInput := &ec2.DescribeInstancesInput{
 		InstanceIds: []string{instanceID},
 	}
-	instancesOutput, err := ec2Client.DescribeInstances(context.TODO(), describeInstancesInput)
+	instancesOutput, err := ec2Client.DescribeInstances(ctx, describeInstancesInput)
 	if err != nil {
 		return "", fmt.Errorf("failed to describe instances: %v", err)
 	}
@@ -111,21 +111,16 @@ func getInstanceState(ec2Client *ec2.Client, instanceID string) (string, error) 
 	return string(instance.State.Name), nil
 }
 
-// attachPolicyToRole 函数将指定的IAM策略附加到指定的IAM角色。
-// 参数:
-// - roleName: IAM角色的名称。
-// - policyArn: 要附加的IAM策略的ARN。
-// 返回:
-// - error: 如果操作失败，则返回错误信息。
-func attachPolicyToRole(roleName, policyArn string) error {
-	cfg, err := config.LoadDefaultConfig(context.TODO())
+// attachPolicyToRole 将指定的IAM策略附加到指定的IAM角色。
+func attachPolicyToRole(ctx context.Context, roleName, policyArn string) error {
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return fmt.Errorf("unable to load SDK config, %v", err)
 	}
 
 	iamClient := iam.NewFromConfig(cfg)
 
-	_, err = iamClient.AttachRolePolicy(context.TODO(), &iam.AttachRolePolicyInput{
+	_, err = iamClient.AttachRolePolicy(ctx, &iam.AttachRolePolicyInput{
 		RoleName:  &roleName,
 		PolicyArn: &policyArn,
 	})
@@ -137,15 +132,10 @@ func attachPolicyToRole(roleName, policyArn string) error {
 	return nil
 }
 
-// associateIamInstanceProfile 函数将指定的IAM实例配置文件（角色）关联到EC2实例。
-// 参数:
-// - instanceID: EC2实例的ID。
-// - roleARN: IAM角色的ARN。
-// 返回:
-// - error: 如果操作失败，则返回错误信息。
-func associateIamInstanceProfile(instanceID, roleARN string) error {
+// associateIamInstanceProfile 将指定的IAM实例配置文件（角色）关联到EC2实例。
+func associateIamInstanceProfile(ctx context.Context, instanceID, roleARN string) error {
 	// 加载AWS配置
-	cfg, err := config.LoadDefaultConfig(context.TODO())
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return fmt.Errorf("unable to load SDK config, %v", err)
 	}
@@ -162,7 +152,7 @@ func associateIamInstanceProfile(instanceID, roleARN string) error {
 	}
 
 	// 关联IAM实例配置文件
-	_, err = ec2Client.AssociateIamInstanceProfile(context.TODO(), input)
+	_, err = ec2Client.AssociateIamInstanceProfile(ctx, input)
 	if err != nil {
 		return fmt.Errorf("failed to associate IAM instance profile %s to instance %s, %v", roleARN, instanceID, err)
 	}
@@ -171,13 +161,12 @@ func associateIamInstanceProfile(instanceID, roleARN string) error {
 	return nil
 }
 
-func prepareSysbenchData(rdsClient *rds.Client, ec2instanceID, clusterID, ec2KeyName string) error {
-
+func prepareSysbenchData(ctx context.Context, rdsClient *rds.Client, ec2instanceID, clusterID, ec2KeyName string) error {
 	// 获取Aurora集群的详细信息
 	describeDBClustersInput := &rds.DescribeDBClustersInput{
 		DBClusterIdentifier: &clusterID,
 	}
-	dbClustersOutput, err := rdsClient.DescribeDBClusters(context.TODO(), describeDBClustersInput)
+	dbClustersOutput, err := rdsClient.DescribeDBClusters(ctx, describeDBClustersInput)
 	if err != nil {
 		log.Fatalf("Failed to describe DBClusters: %v", err)
 		return err
@@ -199,7 +188,7 @@ func prepareSysbenchData(rdsClient *rds.Client, ec2instanceID, clusterID, ec2Key
 	)
 	log.Infof("Drop cmd: %s", dropCmd)
 
-	err = sshCommandRealtime(ec2instanceID, keypair, dropCmd, nil)
+	err = sshCommandRealtime(ctx, ec2instanceID, keypair, dropCmd, nil)
 	if err != nil {
 		return fmt.Errorf("failed to run sysbench prepare with SSH remote exec: %v", err)
 	}
@@ -212,7 +201,7 @@ func prepareSysbenchData(rdsClient *rds.Client, ec2instanceID, clusterID, ec2Key
 
 	log.Infof("Prepare cmd: %s", prepareCmd)
 
-	err = sshCommandRealtime(ec2instanceID, keypair, prepareCmd, nil)
+	err = sshCommandRealtime(ctx, ec2instanceID, keypair, prepareCmd, nil)
 	if err != nil {
 		return fmt.Errorf("failed to run sysbench prepare with SSH remote exec: %v", err)
 	}
@@ -222,14 +211,7 @@ func prepareSysbenchData(rdsClient *rds.Client, ec2instanceID, clusterID, ec2Key
 }
 
 // pollCommandInvocation 轮询命令的执行状态并获取输出。
-// 参数:
-// - ssmClient: SSM 客户端
-// - commandID: 命令的 ID
-// - instanceID: EC2 实例的 ID
-// 返回:
-// - error: 如果操作失败，则返回错误信息
-
-func pollCommandInvocation(ssmClient *ssm.Client, commandID, instanceID string) error {
+func pollCommandInvocation(ctx context.Context, ssmClient *ssm.Client, commandID, instanceID string) error {
 	timeout := 2 * time.Hour // 设置超时时间为 2h
 	startTime := time.Now()
 	lastOutputLength := 0
@@ -239,7 +221,7 @@ func pollCommandInvocation(ssmClient *ssm.Client, commandID, instanceID string) 
 			CommandId:  &commandID,
 			InstanceId: &instanceID,
 		}
-		getCommandInvocationOutput, err := ssmClient.GetCommandInvocation(context.TODO(), getCommandInvocationInput)
+		getCommandInvocationOutput, err := ssmClient.GetCommandInvocation(ctx, getCommandInvocationInput)
 		if err != nil {
 			return fmt.Errorf("failed to get command invocation: %v", err)
 		}
@@ -275,14 +257,14 @@ func pollCommandInvocation(ssmClient *ssm.Client, commandID, instanceID string) 
 	return nil
 }
 
-func sshCommandRealtime(instanceID, sshKeyPath, command string, resultsFile *os.File) error {
-	cfg, err := config.LoadDefaultConfig(context.TODO())
+func sshCommandRealtime(ctx context.Context, instanceID, sshKeyPath, command string, resultsFile *os.File) error {
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return fmt.Errorf("unable to load SDK config, %v", err)
 	}
 
 	ec2Client := ec2.NewFromConfig(cfg)
-	publicNDS, err := getPublicDNS(ec2Client, instanceID)
+	publicNDS, err := getPublicDNS(ctx, ec2Client, instanceID)
 	if err != nil {
 		return fmt.Errorf("failed to get public IP: %v", err)
 	}
@@ -305,47 +287,67 @@ func sshCommandRealtime(instanceID, sshKeyPath, command string, resultsFile *os.
 		return fmt.Errorf("failed to start command: %v", err)
 	}
 
+	// 启动处理 stdout 的 goroutine
 	go func() {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
-			timestamp := time.Now().Format("2006-01-02 15:04:05")
-			output := fmt.Sprintf("[%s STDOUT]: %s", timestamp, scanner.Text())
-			if resultsFile != nil {
-				fmt.Println(output)
-				resultsFile.WriteString(output + "\n")
-			} else {
-				fmt.Println(output)
+			select {
+			case <-ctx.Done():
+				log.Infof("SSH command execution cancelled")
+				return
+			default:
+				timestamp := time.Now().Format("2006-01-02 15:04:05")
+				output := fmt.Sprintf("[%s STDOUT]: %s", timestamp, scanner.Text())
+				if resultsFile != nil {
+					fmt.Println(output)
+					resultsFile.WriteString(output + "\n")
+				} else {
+					fmt.Println(output)
+				}
 			}
 		}
 	}()
 
+	// 启动处理 stderr 的 goroutine
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			timestamp := time.Now().Format("2006-01-02 15:04:05")
-			output := fmt.Sprintf("[%s STDERR]: %s", timestamp, scanner.Text())
-			if resultsFile != nil {
-				fmt.Println(output)
-				resultsFile.WriteString(output + "\n")
-			} else {
-				fmt.Println(output)
+			select {
+			case <-ctx.Done():
+				log.Infof("SSH command execution cancelled")
+				return
+			default:
+				timestamp := time.Now().Format("2006-01-02 15:04:05")
+				output := fmt.Sprintf("[%s STDERR]: %s", timestamp, scanner.Text())
+				if resultsFile != nil {
+					fmt.Println(output)
+					resultsFile.WriteString(output + "\n")
+				} else {
+					fmt.Println(output)
+				}
 			}
 		}
 	}()
 
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("command execution failed: %v", err)
+	// 等待命令执行完毕，检查是否取消
+	err = cmd.Wait()
+	if err != nil {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("SSH command execution cancelled: %v", ctx.Err())
+		default:
+			return fmt.Errorf("command execution failed: %v", err)
+		}
 	}
-
 	return nil
 }
 
-func RunSysbenchPerftest(rdsClient *rds.Client, ssmClient *ssm.Client, ec2instanceID, clusterID, ec2KeyName, testtype string) error {
+func RunSysbenchPerftest(ctx context.Context, rdsClient *rds.Client, ssmClient *ssm.Client, ec2instanceID, clusterID, ec2KeyName, testtype string) error {
 	// 获取 Aurora 集群的详细信息
 	describeDBClustersInput := &rds.DescribeDBClustersInput{
 		DBClusterIdentifier: &clusterID,
 	}
-	dbClustersOutput, err := rdsClient.DescribeDBClusters(context.TODO(), describeDBClustersInput)
+	dbClustersOutput, err := rdsClient.DescribeDBClusters(ctx, describeDBClustersInput)
 	if err != nil {
 		return fmt.Errorf("failed to describe DBClusters: %v", err)
 	}
@@ -354,10 +356,9 @@ func RunSysbenchPerftest(rdsClient *rds.Client, ssmClient *ssm.Client, ec2instan
 	}
 
 	// 获取 Cluster intancecluss Endpoint 和 Port
-	dbinstanceClass, err := getFirstAuroraInstanceClass(rdsClient, clusterID)
+	dbinstanceClass, err := getFirstAuroraInstanceClass(ctx, rdsClient, clusterID)
 	if err != nil {
 		return fmt.Errorf("failed to get aurora instance class: %v", err)
-
 	}
 	log.Infof("dbinstanceClass: %s", dbinstanceClass)
 
@@ -367,12 +368,25 @@ func RunSysbenchPerftest(rdsClient *rds.Client, ssmClient *ssm.Client, ec2instan
 	// 把命令测试结果放到results 目录夹下
 	testFile, err := createResultsFile(dbinstanceClass, testtype)
 	if err != nil {
-		return fmt.Errorf("faild to create test results file: %v", err)
+		return fmt.Errorf("failed to create test results file: %v", err)
 	}
 
 	threadsValues := []int{1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024}
 
+	// 在开始前检查 ctx 是否已被取消
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("operation cancelled before starting Sysbench tests: %v", ctx.Err())
+	default:
+	}
+
 	for _, threads := range threadsValues {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation cancelled before completing threads=%d: %v", threads, ctx.Err())
+		default:
+		}
+
 		runCMD := fmt.Sprintf(
 			"sysbench %s run --time=300 --threads=%d --report-interval=10 --rand-type=uniform --mysql-db=sbtest --mysql-host=%s --mysql-port=%d --mysql-user=admin --mysql-password=%s --tables=50 --table-size=100000000 --mysql-ignore-errors=1062,2013,8028,9007",
 			testtype, threads, *clusterEndpoint, *clusterPort, os.Getenv("MASTER_PASSWORD"),
@@ -381,23 +395,31 @@ func RunSysbenchPerftest(rdsClient *rds.Client, ssmClient *ssm.Client, ec2instan
 		log.Infof("Run cmd: %s", runCMD)
 		keypair := fmt.Sprintf("./%s.pem", ec2KeyName)
 
-		err = sshCommandRealtime(ec2instanceID, keypair, runCMD, testFile)
+		// 在执行命令前再次检查 ctx 状态
+		err = sshCommandRealtime(ctx, ec2instanceID, keypair, runCMD, testFile)
 		if err != nil {
 			return fmt.Errorf("failed to run sysbench with SSH remote exec: %v", err)
 		}
 		log.Infof("sysbench run completed successfully for threads=%d", threads)
 	}
 
+	// 如果所有循环完成, 但ctx取消, 仍然可能是个问题
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("operation cancelled after completing sysbench: %v", ctx.Err())
+	default:
+	}
+
 	fmt.Println("sysbench run totally completed successfully")
 	return nil
 }
 
-func getFirstAuroraInstanceClass(rdsClient *rds.Client, clusterID string) (string, error) {
+func getFirstAuroraInstanceClass(ctx context.Context, rdsClient *rds.Client, clusterID string) (string, error) {
 	// 获取 Aurora 集群的详细信息
 	describeDBClustersInput := &rds.DescribeDBClustersInput{
 		DBClusterIdentifier: &clusterID,
 	}
-	dbClustersOutput, err := rdsClient.DescribeDBClusters(context.TODO(), describeDBClustersInput)
+	dbClustersOutput, err := rdsClient.DescribeDBClusters(ctx, describeDBClustersInput)
 	if err != nil {
 		return "", fmt.Errorf("failed to describe DBClusters: %v", err)
 	}
@@ -419,7 +441,7 @@ func getFirstAuroraInstanceClass(rdsClient *rds.Client, clusterID string) (strin
 	describeDBInstancesInput := &rds.DescribeDBInstancesInput{
 		DBInstanceIdentifier: firstInstanceID,
 	}
-	dbInstancesOutput, err := rdsClient.DescribeDBInstances(context.TODO(), describeDBInstancesInput)
+	dbInstancesOutput, err := rdsClient.DescribeDBInstances(ctx, describeDBInstancesInput)
 	if err != nil {
 		return "", fmt.Errorf("failed to describe DB instance %s: %v", *firstInstanceID, err)
 	}
@@ -438,12 +460,12 @@ func getFirstAuroraInstanceClass(rdsClient *rds.Client, clusterID string) (strin
 }
 
 // RestoreAuroraClusterFromS3 从S3还原数据到已有的Aurora集群
-func RestoreAuroraClusterFromS3(s3BucketName, s3Prefix, clusterID, roleARN, paramGroupName string) error {
+func RestoreAuroraClusterFromS3(ctx context.Context, s3BucketName, s3Prefix, clusterID, roleARN, paramGroupName string) error {
 	masterUserpassword := os.Getenv("MASTER_PASSWORD")
 	parameterGroupFamily := "aurora-mysql8.0"
 	paramterDescription := "Custom parameter group for Aurora MySQL 8.0"
 
-	cfg, err := config.LoadDefaultConfig(context.TODO())
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		log.Fatalf("Unable to load aws config(~/.aws/config), %v", err)
 	}
@@ -465,7 +487,7 @@ func RestoreAuroraClusterFromS3(s3BucketName, s3Prefix, clusterID, roleARN, para
 	}
 
 	// 发送还原请求
-	resp, err := rdsSvc.RestoreDBClusterFromS3(context.TODO(), params)
+	resp, err := rdsSvc.RestoreDBClusterFromS3(ctx, params)
 	if err != nil {
 		return fmt.Errorf("failed to restore data to Aurora %s: %v", clusterID, err)
 	}
@@ -474,7 +496,7 @@ func RestoreAuroraClusterFromS3(s3BucketName, s3Prefix, clusterID, roleARN, para
 	retries := 0
 	startTime := time.Now()
 	for {
-		clusterStatus, err := CheckClusterStatus(clusterID)
+		clusterStatus, err := CheckClusterStatus(ctx, clusterID)
 		if err != nil {
 			return fmt.Errorf("error checking cluster status: %v", err)
 		}
@@ -492,28 +514,28 @@ func RestoreAuroraClusterFromS3(s3BucketName, s3Prefix, clusterID, roleARN, para
 
 	// 创建 paramtergroup
 	rdsClient := rds.NewFromConfig(cfg)
-	err = CreateDBClusterParameterGroup(rdsClient, paramGroupName, paramterDescription, parameterGroupFamily)
+	err = CreateDBClusterParameterGroup(ctx, rdsClient, paramGroupName, paramterDescription, parameterGroupFamily)
 	if err != nil {
 		log.Fatalf("Failed to create Aurora cluster parameter group, %v", err)
 	}
 	log.Infof("DBClusterParameterGroup created: %s", paramGroupName)
 
 	// 绑定 paramtergroup 并修改参数到restore的集群
-	modifyClusterParameters(rdsClient, clusterID, paramGroupName)
+	modifyClusterParameters(ctx, rdsClient, clusterID, paramGroupName)
 
 	return nil
 }
 
 // CheckClusterStatus 检查 Aurora 集群的状态
-func CheckClusterStatus(clusterID string) (string, error) {
-	cfg, err := config.LoadDefaultConfig(context.TODO())
+func CheckClusterStatus(ctx context.Context, clusterID string) (string, error) {
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return "", fmt.Errorf("unable to load AWS config (~/.aws/config), %v", err)
 	}
 	rdsClient := rds.NewFromConfig(cfg)
 
 	// 请求获取 DB 集群信息
-	resp, err := rdsClient.DescribeDBClusters(context.TODO(), &rds.DescribeDBClustersInput{
+	resp, err := rdsClient.DescribeDBClusters(ctx, &rds.DescribeDBClustersInput{
 		DBClusterIdentifier: aws.String(clusterID),
 	})
 	if err != nil {
@@ -532,13 +554,13 @@ func CheckClusterStatus(clusterID string) (string, error) {
 }
 
 // CheckDBInstanceStatus 检查 DB 实例的状态
-func CheckDBInstanceStatus(dbInstanceID string) (string, error) {
-	cfg, err := config.LoadDefaultConfig(context.TODO())
+func CheckDBInstanceStatus(ctx context.Context, dbInstanceID string) (string, error) {
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return "", fmt.Errorf("unable to load AWS config (~/.aws/config), %v", err)
 	}
 	rdsClient := rds.NewFromConfig(cfg)
-	resp, err := rdsClient.DescribeDBInstances(context.TODO(), &rds.DescribeDBInstancesInput{
+	resp, err := rdsClient.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{
 		DBInstanceIdentifier: aws.String(dbInstanceID),
 	})
 
@@ -559,12 +581,12 @@ func CheckDBInstanceStatus(dbInstanceID string) (string, error) {
 }
 
 // ModifyAuroraClusterPassword 修改Aurora MySQL集群的主用户密码
-func ModifyAuroraClusterPassword(rdsSvc *rds.Client, clusterID, newMasterPassword string) error {
+func ModifyAuroraClusterPassword(ctx context.Context, rdsSvc *rds.Client, clusterID, newMasterPassword string) error {
 	params := &rds.ModifyDBClusterInput{
 		DBClusterIdentifier: aws.String(clusterID),
 		MasterUserPassword:  aws.String(newMasterPassword),
 	}
-	_, err := rdsSvc.ModifyDBCluster(context.TODO(), params)
+	_, err := rdsSvc.ModifyDBCluster(ctx, params)
 	if err != nil {
 		return fmt.Errorf("failed to modify Aurora cluster %s password: %v", clusterID, err)
 	}
@@ -573,12 +595,12 @@ func ModifyAuroraClusterPassword(rdsSvc *rds.Client, clusterID, newMasterPasswor
 }
 
 // RestoreAuroraClusterFromSnapshot 从database snapshot还原数据到新建的Aurora集群
-func RestoreAuroraClusterFromSnapshot(clusterID, snapshotID, dbInstanceClass, paramGroupName string) error {
+func RestoreAuroraClusterFromSnapshot(ctx context.Context, clusterID, snapshotID, dbInstanceClass, paramGroupName string) error {
 	masterUserpassword := os.Getenv("MASTER_PASSWORD")
 	parameterGroupFamily := "aurora-mysql8.0"
 	paramterDescription := "Custom parameter group for Aurora MySQL 8.0"
 
-	cfg, err := config.LoadDefaultConfig(context.TODO())
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return fmt.Errorf("Unable to load aws config, %v", err)
 	}
@@ -595,25 +617,25 @@ func RestoreAuroraClusterFromSnapshot(clusterID, snapshotID, dbInstanceClass, pa
 	}
 
 	// 发送还原请求，然后创建cluster的instance
-	resp, err := rdsSvc.RestoreDBClusterFromSnapshot(context.TODO(), params)
+	resp, err := rdsSvc.RestoreDBClusterFromSnapshot(ctx, params)
 	if err != nil {
 		return fmt.Errorf("failed to restore from snapshot %s to Aurora cluster %s: %v", snapshotID, clusterID, err)
 	}
 	dbInstanceID := fmt.Sprintf("%s-instance", clusterID)
-	err = CreateDBInstanceForCluster(clusterID, dbInstanceID, dbInstanceClass)
+	err = CreateDBInstanceForCluster(ctx, clusterID, dbInstanceID, dbInstanceClass)
 	if err != nil {
 		return fmt.Errorf("failed to create database instance: %v", err)
 	}
 	startTime := time.Now()
 
 	// 轮询集群状态，直到恢复完成, 超时时间3h
-	err = PollResourceStatus(clusterID, ResourceTypeAuroraCluster, "available", 3*time.Hour, CheckClusterStatus)
+	err = PollResourceStatus(ctx, clusterID, ResourceTypeAuroraCluster, "available", 3*time.Hour, CheckClusterStatus)
 	if err != nil {
 		return fmt.Errorf("Failed to create restore aurora cluster %s: %v", clusterID, err)
 	}
 
 	// 继续轮询实例状态，直到状态为 available 表示migrate完成，超时时间1h
-	err = PollResourceStatus(dbInstanceID, ResourceTypeAuroraInstance, "available", 3*time.Hour, CheckDBInstanceStatus)
+	err = PollResourceStatus(ctx, dbInstanceID, ResourceTypeAuroraInstance, "available", 3*time.Hour, CheckDBInstanceStatus)
 	if err != nil {
 		return fmt.Errorf("Failed to create restore aurora instance %s: %v", dbInstanceID, err)
 	}
@@ -621,24 +643,24 @@ func RestoreAuroraClusterFromSnapshot(clusterID, snapshotID, dbInstanceClass, pa
 	GreenInfof("successfully restore data to Aurora %s: %v, total restore cost time: %v", clusterID, resp, time.Since(startTime))
 
 	// 修改主用户密码
-	err = ModifyAuroraClusterPassword(rdsSvc, clusterID, masterUserpassword)
+	err = ModifyAuroraClusterPassword(ctx, rdsSvc, clusterID, masterUserpassword)
 	if err != nil {
 		return fmt.Errorf("failed to modify master user password: %v", err)
 	}
 
 	// 创建 paramtergroup
 	rdsClient := rds.NewFromConfig(cfg)
-	err = CreateDBClusterParameterGroup(rdsClient, paramGroupName, paramterDescription, parameterGroupFamily)
+	err = CreateDBClusterParameterGroup(ctx, rdsClient, paramGroupName, paramterDescription, parameterGroupFamily)
 	if err != nil {
 		return fmt.Errorf("Failed to create Aurora cluster parameter group, %v", err)
 	}
 	log.Infof("DBClusterParameterGroup created: %s", paramGroupName)
 
 	// 绑定 paramtergroup 并修改参数到restore的集群
-	modifyClusterParameters(rdsClient, clusterID, paramGroupName)
+	modifyClusterParameters(ctx, rdsClient, clusterID, paramGroupName)
 
 	// 重启实例
-	err = RestartDBInstance(dbInstanceID)
+	err = RestartDBInstance(ctx, dbInstanceID)
 	if err != nil {
 		return fmt.Errorf("failed to restart database instance: %v", err)
 	}
@@ -647,9 +669,9 @@ func RestoreAuroraClusterFromSnapshot(clusterID, snapshotID, dbInstanceClass, pa
 }
 
 // RestartDBInstance 重启指定的数据库实例
-func RestartDBInstance(instanceID string) error {
+func RestartDBInstance(ctx context.Context, instanceID string) error {
 	// 加载默认配置
-	cfg, err := config.LoadDefaultConfig(context.TODO())
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		log.Fatalf("Unable to load aws config(~/.aws/config), %v", err)
 	}
@@ -661,7 +683,7 @@ func RestartDBInstance(instanceID string) error {
 	}
 
 	// 发送重启实例请求
-	_, err = rdsClient.RebootDBInstance(context.TODO(), params)
+	_, err = rdsClient.RebootDBInstance(ctx, params)
 	if err != nil {
 		return fmt.Errorf("failed to reboot DB instance %s: %v", instanceID, err)
 	}
@@ -670,15 +692,15 @@ func RestartDBInstance(instanceID string) error {
 	return nil
 }
 
-func ModifyAuroraInstanceType(clusterID, instanceType string) error {
-	cfg, err := config.LoadDefaultConfig(context.TODO())
+func ModifyAuroraInstanceType(ctx context.Context, clusterID, instanceType string) error {
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load AWS configuration: %v", err)
 	}
 	rdsClient := rds.NewFromConfig(cfg)
 
 	// 获取集群中的实例列表
-	describeOutput, err := rdsClient.DescribeDBInstances(context.TODO(), &rds.DescribeDBInstancesInput{
+	describeOutput, err := rdsClient.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{
 		Filters: []rdstypes.Filter{
 			{
 				Name:   aws.String("db-cluster-id"),
@@ -695,7 +717,7 @@ func ModifyAuroraInstanceType(clusterID, instanceType string) error {
 		instanceID := *dbInstance.DBInstanceIdentifier
 		log.Infof("Modifying instance %s to type %s", instanceID, instanceType)
 
-		_, err := rdsClient.ModifyDBInstance(context.TODO(), &rds.ModifyDBInstanceInput{
+		_, err := rdsClient.ModifyDBInstance(ctx, &rds.ModifyDBInstanceInput{
 			DBInstanceIdentifier: aws.String(instanceID),
 			DBInstanceClass:      aws.String(instanceType),
 			ApplyImmediately:     aws.Bool(true),
@@ -704,14 +726,14 @@ func ModifyAuroraInstanceType(clusterID, instanceType string) error {
 			return fmt.Errorf("failed to modify instance %s: %v", instanceID, err)
 		}
 		// 轮询每个实例状态，直到状态为 available 表示更改完成，超时时间1h
-		err = PollResourceStatus(instanceID, ResourceTypeAuroraInstance, "available", 1*time.Hour, CheckDBInstanceStatus)
+		err = PollResourceStatus(ctx, instanceID, ResourceTypeAuroraInstance, "available", 1*time.Hour, CheckDBInstanceStatus)
 		if err != nil {
 			return fmt.Errorf("Failed to modify Aurora instance %s to type %s: %v", instanceID, instanceType, err)
 		}
 		log.Infof("Modification of instance %s to type %s initiated successfully", instanceID, instanceType)
 	}
 	// 轮询集群状态，直到恢复完成, 超时时间1h
-	err = PollResourceStatus(clusterID, ResourceTypeAuroraCluster, "available", 1*time.Hour, CheckClusterStatus)
+	err = PollResourceStatus(ctx, clusterID, ResourceTypeAuroraCluster, "available", 1*time.Hour, CheckClusterStatus)
 	if err != nil {
 		return fmt.Errorf("Failed to get Aurora cluster %s status to available: %v", clusterID, err)
 	}

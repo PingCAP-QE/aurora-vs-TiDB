@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -95,33 +96,39 @@ aws_session_token = %s
 	return nil
 }
 
-// 待优化，action 动作带入ctx，暂时先不加吧
-func startAssumeRoleProcess(ctx context.Context, roleARN, roleSession string, duration int32) {
+// 定期刷新 AWS 临时凭据，并在 context 关闭信号到达时优雅退出
+func startAssumeRoleProcess(ctx context.Context, wg *sync.WaitGroup, roleARN, roleSession string, duration int32) {
+	defer func() {
+		GreenInfof("Assume-role process for role %s has exited Gracefully.", roleARN)
+		wg.Done() // 确保协程退出时调用 wg.Done()
+	}()
+
+	// 每 10 分钟刷新一次凭据
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
+
+	GreenInfof("Assume-role process started for role: %s", roleARN)
 
 	for {
 		select {
 		case <-ticker.C:
+			// 尝试获取新凭据
 			creds, err := assumeRole(roleARN, roleSession, duration)
 			if err != nil {
-				log.Infof("Error renewing credentials: %v", err)
+				log.Errorf("Failed to renew credentials: %v", err)
 				continue
 			}
-			err = WriteCredentialsToFile(creds)
-			if err != nil {
-				log.Infof("Error writing credentials to file: %v", err)
+
+			// 尝试将凭据写入文件
+			if err := WriteCredentialsToFile(creds); err != nil {
+				log.Errorf("Failed to write credentials to file: %v", err)
 				continue
 			}
-			log.Infof("Credentials renewed. New expiration: %s", creds.Expiration)
+
+			GreenInfof("Credentials renewed successfully. New expiration: %s", creds.Expiration)
 		case <-ctx.Done():
-			log.Infof("Assume-role process stopped.")
+			log.Infof("Assume-role process stopped due to context cancellation, received signal: ctx.Done")
 			return
-		case <-time.After(1 * time.Second): // 使用 time.After 来短时间检查是否有退出信号
-			if ctx.Err() != nil {
-				log.Infof("Assume-role process stopped due to main process done.")
-				return
-			}
 		}
 	}
 }

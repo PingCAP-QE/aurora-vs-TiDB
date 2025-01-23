@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -16,18 +18,19 @@ const (
 )
 
 // 定义检查状态的函数类型
-type StatusChecker func(resourceID string) (string, error)
+type StatusChecker func(ctx context.Context, resourceID string) (string, error)
 
 // PollResourceStatus 轮询资源状态直到达到目标状态或超时
-func PollResourceStatus(resourceID, resourceType, targetStatus string, timeout time.Duration, checkStatusFunc StatusChecker) error {
+func PollResourceStatus(ctx context.Context, resourceID, resourceType, targetStatus string, timeout time.Duration, checkStatusFunc StatusChecker) error {
 	startTime := time.Now()
 	retries := 1
-	//api 与 action-resp 异步操作
+
+	// API 与 action-resp 异步操作
 	time.Sleep(10 * time.Second)
 
 	for {
 		// 检查资源状态
-		currentStatus, err := checkStatusFunc(resourceID)
+		currentStatus, err := checkStatusFunc(ctx, resourceID)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"resource": resourceID,
@@ -59,7 +62,22 @@ func PollResourceStatus(resourceID, resourceType, targetStatus string, timeout t
 			return fmt.Errorf("polling for resource %s timed out after %s: current-state %s, expected-state %s", resourceID, timeout, currentStatus, targetStatus)
 		}
 
-		retries++
-		time.Sleep(30 * time.Second)
+		// 检查是否收到取消信号
+		select {
+		case <-ctx.Done():
+			log.WithFields(log.Fields{
+				"resource": resourceID,
+			}).Warn("Polling canceled due to context cancellation")
+			return fmt.Errorf("polling for resource %s was canceled: %v", resourceID, ctx.Err())
+		default:
+			// 继续轮询
+			retries++
+			time.Sleep(30 * time.Second)
+		}
 	}
+}
+
+func cancelAndWait(cancel context.CancelFunc, wg *sync.WaitGroup) {
+	cancel()
+	wg.Wait()
 }
