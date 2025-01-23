@@ -72,17 +72,17 @@ This tool provides an automated way to do aurora automatic performance testing, 
 
 #### Create an RDS Aurora Cluster
 ```bash
-bin/aurora-vs-TiDB --action=create-rds --cluster-id=Aurora-v3060-r6g4xl --instance-id=Aurora-v3060-r6g4xl-instance --param-group-name=my-custom-aurora-mysql80
+bin/aurora-vs-TiDB --action=create-rds --cluster-id=Aurora-v3060-perftest --instance-id=Aurora-v3060-perftest-instance --param-group-name=my-custom-aurora-mysql80
 ```
 
 #### Modify Aurora Cluster Parameters
 ```bash
-bin/aurora-vs-TiDB --action=modify-params --cluster-id=Aurora-v3060-r6g4xl --param-group-name=my-custom-aurora-mysql80
+bin/aurora-vs-TiDB --action=modify-params --cluster-id=Aurora-v3060-perftest --param-group-name=my-custom-aurora-mysql80
 ```
 
 #### Delete an existing Aurora cluster, instance, and parameter group
 ```bash
-bin/aurora-vs-TiDB --action=delete-rds --cluster-id=Aurora-v3060-r6g4xl --instance-id=Aurora-v3060-r6g4xl-instance --param-group-name=my-custom-aurora-mysql80
+bin/aurora-vs-TiDB --action=delete-rds --cluster-id=Aurora-v3060-perftest --instance-id=Aurora-v3060-perftest-instance --param-group-name=my-custom-aurora-mysql80
 ```
 
 #### Create an EC2 Client Instance
@@ -97,12 +97,12 @@ bin/aurora-vs-TiDB--action init-perftest-env --ec2-instance-id i-1234567890abcde
 
 #### Prepare Data for Sysbench
 ```bash
-bin/aurora-vs-TiDB --action prepare-data --ec2-instance-id i-1234567890abcdef0 --cluster-id Aurora-v3060-r6g4xl
+bin/aurora-vs-TiDB --action prepare-data --ec2-instance-id i-1234567890abcdef0 --cluster-id Aurora-v3060-perftest
 ```
 
 #### Run Sysbench Performance Test
 ```bash
-bin/aurora-vs-TiDB --action perftest-run --ec2-instance-id i-1234567890abcdef0 --cluster-id Aurora-v3060-r6g4xl --perf-type oltp_read_write
+bin/aurora-vs-TiDB --action perftest-run --ec2-instance-id i-1234567890abcdef0 --cluster-id Aurora-v3060-perftest --perf-type oltp_read_write
 ```
 
 ## Code Structure

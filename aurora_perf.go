@@ -5,19 +5,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 
+	log "github.com/sirupsen/logrus"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
+	rdstypes "github.com/aws/aws-sdk-go-v2/service/rds/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/smithy-go"
 )
 
@@ -30,7 +32,7 @@ func initPerfTestEnv(ec2Client *ec2.Client, ec2InstanceID, ec2KeyName string) er
 	if instanceState != "running" {
 		return fmt.Errorf("instance %s is not in a valid state: %s", ec2InstanceID, instanceState)
 	}
-	fmt.Printf("current instance status: %s\n", instanceState)
+	log.Infof("current instance status: %s", instanceState)
 	// 安装mysql-client和sysbench的命令
 	command := `
 sudo yum update -y &&
@@ -51,7 +53,7 @@ sudo make install
 		return fmt.Errorf("failed to run command: %v", err)
 	}
 
-	fmt.Printf("mysql-client and sysbench installed on EC2 instance %s\n", ec2InstanceID)
+	log.Infof("mysql-client and sysbench installed on EC2 instance %s", ec2InstanceID)
 	return nil
 }
 
@@ -131,7 +133,7 @@ func attachPolicyToRole(roleName, policyArn string) error {
 		return fmt.Errorf("failed to attach policy %s to role %s, %v", policyArn, roleName, err)
 	}
 
-	fmt.Printf("Policy %s attached to role %s successfully\n", policyArn, roleName)
+	log.Infof("Policy %s attached to role %s successfully", policyArn, roleName)
 	return nil
 }
 
@@ -165,7 +167,7 @@ func associateIamInstanceProfile(instanceID, roleARN string) error {
 		return fmt.Errorf("failed to associate IAM instance profile %s to instance %s, %v", roleARN, instanceID, err)
 	}
 
-	fmt.Printf("IAM instance profile %s associated with instance %s successfully\n", roleARN, instanceID)
+	log.Infof("IAM instance profile %s associated with instance %s successfully", roleARN, instanceID)
 	return nil
 }
 
@@ -195,7 +197,7 @@ func prepareSysbenchData(rdsClient *rds.Client, ec2instanceID, clusterID, ec2Key
 		"mysql -u admin -p%s -h %s -P %d -e 'DROP DATABASE IF EXISTS sbtest; CREATE DATABASE sbtest;'",
 		os.Getenv("MASTER_PASSWORD"), *clusterEndpoint, *clusterPort,
 	)
-	fmt.Printf("Drop cmd: %s\n", dropCmd)
+	log.Infof("Drop cmd: %s", dropCmd)
 
 	err = sshCommandRealtime(ec2instanceID, keypair, dropCmd, nil)
 	if err != nil {
@@ -208,7 +210,7 @@ func prepareSysbenchData(rdsClient *rds.Client, ec2instanceID, clusterID, ec2Key
 		*clusterEndpoint, *clusterPort, os.Getenv("MASTER_PASSWORD"),
 	)
 
-	fmt.Printf("Prepare cmd: %s\n", prepareCmd)
+	log.Infof("Prepare cmd: %s", prepareCmd)
 
 	err = sshCommandRealtime(ec2instanceID, keypair, prepareCmd, nil)
 	if err != nil {
@@ -247,7 +249,7 @@ func pollCommandInvocation(ssmClient *ssm.Client, commandID, instanceID string) 
 		stdErr := *getCommandInvocationOutput.StandardErrorContent
 
 		// 打印当前状态
-		fmt.Printf("Status: %s\n", status)
+		log.Infof("Status: %s", status)
 
 		// 获取新的输出内容
 		if len(stdOut) > lastOutputLength {
@@ -257,7 +259,7 @@ func pollCommandInvocation(ssmClient *ssm.Client, commandID, instanceID string) 
 		}
 
 		if stdErr != "" {
-			fmt.Printf("StandardErrorContent: %s\n", stdErr)
+			log.Infof("StandardErrorContent: %s", stdErr)
 		}
 
 		if status == "Success" || status == "Failed" || status == "Cancelled" {
@@ -287,7 +289,7 @@ func sshCommandRealtime(instanceID, sshKeyPath, command string, resultsFile *os.
 
 	sshUser := "ec2-user" // 默认的 EC2 用户名，根据您的 AMI 可能需要调整
 	sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no %s@%s %s", sshKeyPath, sshUser, publicNDS, command)
-	fmt.Printf("Exec cmd: %s\n", sshCmd)
+	log.Infof("Exec cmd: %s", sshCmd)
 
 	cmd := exec.Command("bash", "-c", sshCmd)
 
@@ -357,7 +359,7 @@ func RunSysbenchPerftest(rdsClient *rds.Client, ssmClient *ssm.Client, ec2instan
 		return fmt.Errorf("failed to get aurora instance class: %v", err)
 
 	}
-	fmt.Printf("dbinstanceClass: %s\n", dbinstanceClass)
+	log.Infof("dbinstanceClass: %s", dbinstanceClass)
 
 	clusterEndpoint := dbClustersOutput.DBClusters[0].Endpoint
 	clusterPort := dbClustersOutput.DBClusters[0].Port
@@ -376,14 +378,14 @@ func RunSysbenchPerftest(rdsClient *rds.Client, ssmClient *ssm.Client, ec2instan
 			testtype, threads, *clusterEndpoint, *clusterPort, os.Getenv("MASTER_PASSWORD"),
 		)
 
-		fmt.Printf("Run cmd: %s\n", runCMD)
+		log.Infof("Run cmd: %s", runCMD)
 		keypair := fmt.Sprintf("./%s.pem", ec2KeyName)
 
 		err = sshCommandRealtime(ec2instanceID, keypair, runCMD, testFile)
 		if err != nil {
 			return fmt.Errorf("failed to run sysbench with SSH remote exec: %v", err)
 		}
-		fmt.Printf("sysbench run completed successfully for threads=%d\n", threads)
+		log.Infof("sysbench run completed successfully for threads=%d", threads)
 	}
 
 	fmt.Println("sysbench run totally completed successfully")
@@ -476,17 +478,17 @@ func RestoreAuroraClusterFromS3(s3BucketName, s3Prefix, clusterID, roleARN, para
 		if err != nil {
 			return fmt.Errorf("error checking cluster status: %v", err)
 		}
-		fmt.Printf("Cluster %s status: %s\n", clusterID, clusterStatus)
+		log.Infof("Cluster %s status: %s", clusterID, clusterStatus)
 
 		if clusterStatus == "available" || retries == 240 {
 			duration := time.Since(startTime)
-			fmt.Printf("Cluster %s is available and ready to use, cost time: %s\n", clusterID, duration)
+			log.Infof("Cluster %s is available and ready to use, cost time: %s", clusterID, duration)
 			break
 		}
 		retries++
 		time.Sleep(30 * time.Second)
 	}
-	fmt.Printf("successfully restore data to Aurora %s: %v\n", clusterID, resp)
+	log.Infof("successfully restore data to Aurora %s: %v", clusterID, resp)
 
 	// 创建 paramtergroup
 	rdsClient := rds.NewFromConfig(cfg)
@@ -494,7 +496,7 @@ func RestoreAuroraClusterFromS3(s3BucketName, s3Prefix, clusterID, roleARN, para
 	if err != nil {
 		log.Fatalf("Failed to create Aurora cluster parameter group, %v", err)
 	}
-	fmt.Printf("DBClusterParameterGroup created: %s\n", paramGroupName)
+	log.Infof("DBClusterParameterGroup created: %s", paramGroupName)
 
 	// 绑定 paramtergroup 并修改参数到restore的集群
 	modifyClusterParameters(rdsClient, clusterID, paramGroupName)
@@ -526,9 +528,7 @@ func CheckClusterStatus(clusterID string) (string, error) {
 		return "", fmt.Errorf("no DB cluster found with ID: %s", clusterID)
 	}
 
-	// 获取集群状态
-	clusterStatus := aws.StringValue(resp.DBClusters[0].Status)
-	return clusterStatus, nil
+	return *resp.DBClusters[0].Status, nil
 }
 
 // CheckDBInstanceStatus 检查 DB 实例的状态
@@ -555,9 +555,7 @@ func CheckDBInstanceStatus(dbInstanceID string) (string, error) {
 		return "", fmt.Errorf("no DB instance found with identifier: %s", dbInstanceID)
 	}
 
-	instanceStatus := aws.StringValue(resp.DBInstances[0].DBInstanceStatus)
-
-	return instanceStatus, nil
+	return *resp.DBInstances[0].DBInstanceStatus, nil
 }
 
 // ModifyAuroraClusterPassword 修改Aurora MySQL集群的主用户密码
@@ -570,7 +568,7 @@ func ModifyAuroraClusterPassword(rdsSvc *rds.Client, clusterID, newMasterPasswor
 	if err != nil {
 		return fmt.Errorf("failed to modify Aurora cluster %s password: %v", clusterID, err)
 	}
-	fmt.Printf("Successfully modified password for Aurora cluster %s\n", clusterID)
+	log.Infof("Successfully modified password for Aurora cluster %s", clusterID)
 	return nil
 }
 
@@ -582,7 +580,7 @@ func RestoreAuroraClusterFromSnapshot(clusterID, snapshotID, dbInstanceClass, pa
 
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
-		log.Fatalf("Unable to load aws config(~/.aws/config), %v", err)
+		return fmt.Errorf("Unable to load aws config, %v", err)
 	}
 	rdsSvc := rds.NewFromConfig(cfg)
 
@@ -604,49 +602,23 @@ func RestoreAuroraClusterFromSnapshot(clusterID, snapshotID, dbInstanceClass, pa
 	dbInstanceID := fmt.Sprintf("%s-instance", clusterID)
 	err = CreateDBInstanceForCluster(clusterID, dbInstanceID, dbInstanceClass)
 	if err != nil {
-		log.Fatalf("failed to create database instance: %v\n", err)
+		return fmt.Errorf("failed to create database instance: %v", err)
 	}
+	startTime := time.Now()
 
 	// 轮询集群状态，直到恢复完成, 超时时间3h
-	retries := 0
-	startTime1 := time.Now()
-	for {
-		clusterStatus, err := CheckClusterStatus(clusterID)
-		if err != nil {
-			return fmt.Errorf("error checking cluster status: %v", err)
-		}
-		fmt.Printf("Cluster %s status: %s. Polling cycle: %d\n", clusterID, clusterStatus, retries+1)
-
-		if clusterStatus == "available" || retries == 360 {
-			duration := time.Since(startTime1)
-			fmt.Printf("Cluster %s is available and ready to use, cost time: %s\n", clusterID, duration)
-			break
-		}
-		retries++
-		time.Sleep(30 * time.Second)
+	err = PollResourceStatus(clusterID, ResourceTypeAuroraCluster, "available", 3*time.Hour, CheckClusterStatus)
+	if err != nil {
+		return fmt.Errorf("Failed to create restore aurora cluster %s: %v", clusterID, err)
 	}
 
 	// 继续轮询实例状态，直到状态为 available 表示migrate完成，超时时间1h
-	startTime2 := time.Now()
-	retries = 0
-	for {
-		instanceStatus, err := CheckDBInstanceStatus(dbInstanceID)
-		if err != nil {
-			log.Fatalf("error checking cluster instance status: %v", err)
-		}
-
-		fmt.Printf("Cluster instance %s status: %s. Polling cycle: %d\n\n", dbInstanceID, instanceStatus, retries+1)
-
-		if instanceStatus == "available" || retries == 120 {
-			duration := time.Since(startTime2)
-			fmt.Printf("Cluster instance %s is available, time cost: %v\n", dbInstanceID, duration)
-			break
-		}
-		retries++
-		time.Sleep(30 * time.Second)
+	err = PollResourceStatus(dbInstanceID, ResourceTypeAuroraInstance, "available", 3*time.Hour, CheckDBInstanceStatus)
+	if err != nil {
+		return fmt.Errorf("Failed to create restore aurora instance %s: %v", dbInstanceID, err)
 	}
 
-	fmt.Printf("successfully restore data to Aurora %s: %v, total restore cost time: %v\n", clusterID, resp, time.Since(startTime1))
+	GreenInfof("successfully restore data to Aurora %s: %v, total restore cost time: %v", clusterID, resp, time.Since(startTime))
 
 	// 修改主用户密码
 	err = ModifyAuroraClusterPassword(rdsSvc, clusterID, masterUserpassword)
@@ -658,12 +630,91 @@ func RestoreAuroraClusterFromSnapshot(clusterID, snapshotID, dbInstanceClass, pa
 	rdsClient := rds.NewFromConfig(cfg)
 	err = CreateDBClusterParameterGroup(rdsClient, paramGroupName, paramterDescription, parameterGroupFamily)
 	if err != nil {
-		log.Fatalf("Failed to create Aurora cluster parameter group, %v", err)
+		return fmt.Errorf("Failed to create Aurora cluster parameter group, %v", err)
 	}
-	fmt.Printf("DBClusterParameterGroup created: %s\n", paramGroupName)
+	log.Infof("DBClusterParameterGroup created: %s", paramGroupName)
 
 	// 绑定 paramtergroup 并修改参数到restore的集群
 	modifyClusterParameters(rdsClient, clusterID, paramGroupName)
 
+	// 重启实例
+	err = RestartDBInstance(dbInstanceID)
+	if err != nil {
+		return fmt.Errorf("failed to restart database instance: %v", err)
+	}
+
+	return nil
+}
+
+// RestartDBInstance 重启指定的数据库实例
+func RestartDBInstance(instanceID string) error {
+	// 加载默认配置
+	cfg, err := config.LoadDefaultConfig(context.TODO())
+	if err != nil {
+		log.Fatalf("Unable to load aws config(~/.aws/config), %v", err)
+	}
+	rdsClient := rds.NewFromConfig(cfg)
+
+	// 构建重启实例请求参数
+	params := &rds.RebootDBInstanceInput{
+		DBInstanceIdentifier: aws.String(instanceID),
+	}
+
+	// 发送重启实例请求
+	_, err = rdsClient.RebootDBInstance(context.TODO(), params)
+	if err != nil {
+		return fmt.Errorf("failed to reboot DB instance %s: %v", instanceID, err)
+	}
+
+	log.Infof("Successfully rebooted DB instance %s", instanceID)
+	return nil
+}
+
+func ModifyAuroraInstanceType(clusterID, instanceType string) error {
+	cfg, err := config.LoadDefaultConfig(context.TODO())
+	if err != nil {
+		return fmt.Errorf("failed to load AWS configuration: %v", err)
+	}
+	rdsClient := rds.NewFromConfig(cfg)
+
+	// 获取集群中的实例列表
+	describeOutput, err := rdsClient.DescribeDBInstances(context.TODO(), &rds.DescribeDBInstancesInput{
+		Filters: []rdstypes.Filter{
+			{
+				Name:   aws.String("db-cluster-id"),
+				Values: []string{clusterID},
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to describe DB instances: %v", err)
+	}
+
+	// 修改每个实例的类型
+	for _, dbInstance := range describeOutput.DBInstances {
+		instanceID := *dbInstance.DBInstanceIdentifier
+		log.Infof("Modifying instance %s to type %s", instanceID, instanceType)
+
+		_, err := rdsClient.ModifyDBInstance(context.TODO(), &rds.ModifyDBInstanceInput{
+			DBInstanceIdentifier: aws.String(instanceID),
+			DBInstanceClass:      aws.String(instanceType),
+			ApplyImmediately:     aws.Bool(true),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to modify instance %s: %v", instanceID, err)
+		}
+		// 轮询每个实例状态，直到状态为 available 表示更改完成，超时时间1h
+		err = PollResourceStatus(instanceID, ResourceTypeAuroraInstance, "available", 1*time.Hour, CheckDBInstanceStatus)
+		if err != nil {
+			return fmt.Errorf("Failed to modify Aurora instance %s to type %s: %v", instanceID, instanceType, err)
+		}
+		log.Infof("Modification of instance %s to type %s initiated successfully", instanceID, instanceType)
+	}
+	// 轮询集群状态，直到恢复完成, 超时时间1h
+	err = PollResourceStatus(clusterID, ResourceTypeAuroraCluster, "available", 1*time.Hour, CheckClusterStatus)
+	if err != nil {
+		return fmt.Errorf("Failed to get Aurora cluster %s status to available: %v", clusterID, err)
+	}
+	log.Infof("Modification cluster %s all instances to type %s successfully", clusterID, instanceType)
 	return nil
 }

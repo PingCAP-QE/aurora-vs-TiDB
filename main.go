@@ -4,21 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"regexp"
 	"time"
 
+	log "github.com/sirupsen/logrus"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2type "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	rdstype "github.com/aws/aws-sdk-go-v2/service/rds/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/smithy-go"
-
 	"github.com/spf13/pflag"
 )
 
@@ -26,6 +25,56 @@ func isValidParamGroupName(name string) bool {
 	// 正则表达式验证参数组名称
 	matched, _ := regexp.MatchString(`^[a-zA-Z][a-zA-Z0-9-]*[a-zA-Z0-9]$`, name)
 	return matched
+}
+
+type CustomFormatter struct {
+	log.TextFormatter
+}
+
+func (f *CustomFormatter) Format(entry *log.Entry) ([]byte, error) {
+	var levelColor string
+	switch entry.Level {
+	case log.InfoLevel:
+		levelColor = "\033[0m" // 默认
+		//levelColor = "\033[1;34m" // 蓝色
+	case log.WarnLevel:
+		levelColor = "\033[1;33m" // 黄色
+	case log.ErrorLevel:
+		levelColor = "\033[0;31m" // 普通红色
+	case log.FatalLevel:
+		levelColor = "\033[1;31m" // 加粗红色
+	case log.DebugLevel:
+		levelColor = "\033[1;36m" // 青色
+	default:
+		levelColor = "\033[0m" // 默认
+	}
+
+	// 特殊字段着色逻辑
+	for key, value := range entry.Data {
+		if key == "successField" {
+			greenColor := "\033[1;32m"
+			resetColor := "\033[0m"
+			entry.Data[key] = fmt.Sprintf("%s%s%s", greenColor, value, resetColor)
+		}
+		if key == "failField" {
+			redColor := "\033[0;31m"
+			resetColor := "\033[0m"
+			entry.Data[key] = fmt.Sprintf("%s%s%s", redColor, value, resetColor)
+		}
+		if key == "processingFiled" {
+			blueColor := "\033[1;34m"
+			resetColor := "\033[0m"
+			entry.Data[key] = fmt.Sprintf("%s%s%s", blueColor, value, resetColor)
+		}
+	}
+
+	entry.Message = fmt.Sprintf("%s%s\033[0m", levelColor, entry.Message)
+	return f.TextFormatter.Format(entry)
+}
+
+func GreenInfof(format string, args ...interface{}) {
+	// 使用 Infof 打印并加上绿色的转义字符
+	log.Infof("\033[1;32m"+format+"\033[0m", args...)
 }
 
 func main() {
@@ -47,28 +96,34 @@ func main() {
 		roleSession string
 	)
 
-	pflag.StringVarP(&action, "action", "a", "", "Action to perform: 'create-rds', 'delete-rds', 'modify-params', 'create-client', 'delete-client','init-perftest-env','prepare-data'")
+	pflag.StringVarP(&action, "action", "a", "", "Action to perform: 'create-rds', 'delete-rds', 'modify-params', 'create-client', 'delete-client','init-perftest-env','prepare-data','perftest-run','modify-dbinstance-type'")
 	pflag.StringVarP(&clusterID, "cluster-id", "c", "", "Aurora cluster identifier")
 	pflag.StringVarP(&instanceID, "instance-id", "i", "", "Aurora instance identifier")
 	pflag.StringVarP(&paramGroupName, "param-group-name", "p", "my-custom-aurora-mysql80", "Parameter group name(default: my-custom-aurora-mysql80)")
 	pflag.StringVarP(&dbInstanceClass, "instance-class", "d", "db.r6g.4xlarge", "Aurora instance class (default: db.r6g.4xlarge)")
 	pflag.StringVarP(&ec2InstanceType, "ec2-instance-type", "t", "m5.2xlarge", "EC2 instance type (default: m5.2xlarge)")
-	pflag.StringVarP(&ec2ImageID, "ec2-image-id", "m", "ami-0afb6e8e0625142bc", "EC2 image ID (default: ami-0afb6e8e0625142bc)") // amazone linux 2023 ami-id:ami-046d7944dd9e73a61 for default
-	pflag.StringVarP(&ec2InstanceID, "ec2-instance-id", "e", "", "EC2 instance ID")                                              // like  i-0596d9ed0e24f825d
+	pflag.StringVarP(&ec2ImageID, "ec2-image-id", "m", "ami-0afb6e8e0625142bc", "EC2 image ID, default os image is centos7 (default: ami-0afb6e8e0625142bc)") // amazone linux 2023 ami-id:ami-046d7944dd9e73a61 for default
+	pflag.StringVarP(&ec2InstanceID, "ec2-instance-id", "e", "", "EC2 instance ID")                                                                           // like  i-0596d9ed0e24f825d
 	pflag.StringVarP(&ec2SecurityGroupID, "ec2-security-group-id", "g", "", "EC2 security group ID")
 	pflag.StringVarP(&ec2KeyName, "ec2-key-name", "k", "pub-st-rsa", "EC2 key pair name(default: pub-st-rsa)")
-	pflag.BoolVarP(&restore, "restore", "s", false, "Restore data from S3 instead of preparing data with Sysbench, create a new cluster")
+	pflag.BoolVarP(&restore, "restore", "s", false, "Restore data from S3 instead of preparing data with Sysbench, create a new cluster and restore data from mysql-snapshot")
 	pflag.StringVarP(&perfType, "perf-type", "o", "", "Sysbench oltp perf type:oltp_read_only/oltp_read_write/oltp_write_only")
 	pflag.StringVarP(&roleARN, "role-arn", "r", "arn:aws:iam::986330900858:role/full-manager-service-role", "aws login account roleARN (default: arn:aws:iam::986330900858:role/full-manager-service-role)")
-	pflag.StringVarP(&roleSession, "role-session", "n", "full-manager-service-role", "aws login account roleA session name (default: full-manager-service-role)")
-
-	//pflag.Int32(&tokenExpiration, "token-expiration", 36000, "aws roleARN credentials expiration")
-
+	pflag.StringVarP(&roleSession, "role-session", "n", "full-manager-service-role", "aws login account role session name (default: full-manager-service-role)")
 	pflag.Parse()
+
+	// set log-level and format
+	log.SetLevel(log.InfoLevel)
+	log.SetFormatter(&CustomFormatter{
+		TextFormatter: log.TextFormatter{
+			FullTimestamp: true,
+			ForceColors:   true,
+		},
+	})
 
 	// 验证参数组名称是否符合要求
 	if !isValidParamGroupName(paramGroupName) {
-		fmt.Printf("groupname is %s\n", paramGroupName)
+		log.Infof("dbGroupname is %s", paramGroupName)
 		log.Fatalf("Invalid DBClusterParameterGroupName: %s. Name must start with a letter, contain only ASCII letters, digits, and hyphens, and must not end with a hyphen or contain two consecutive hyphens or a period.", paramGroupName)
 	}
 
@@ -78,7 +133,7 @@ func main() {
 		log.Fatalf("MASTER_PASSWORD environment variable is not set")
 	}
 
-	// 加载AWS配置
+	// 加载AWS配置并获取ak/sk/token，然后起 assume-role 协程一直刷新token，保证程序不会中断，程序运行前需要配置 ak/sk/token到 ~/.aws/creditial
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
 		log.Fatalf("Unable to load aws config(~/.aws/config), %v", err)
@@ -113,7 +168,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to get RDS login information")
 		}
-		fmt.Printf("RDS login command: %s\n", loginInfo)
+		log.Infof("RDS login command: %s", loginInfo)
 	case "create-client":
 		if clusterID == "" || ec2ImageID == "" || ec2InstanceType == "" || ec2KeyName == "" {
 			log.Fatalf("For 'create-client' action, --cluster-id is required")
@@ -122,9 +177,9 @@ func main() {
 		if err != nil {
 			log.Fatalf("Failed to create client EC2 instance: %v", err)
 		}
-		fmt.Printf("Client EC2 instance created with ID: %s\n", instanceID)
-		fmt.Printf("Public DNS: %s\n", publicDNS)
-		fmt.Printf("Login command: ssh -i %s.pem ec2-user@%s\n", ec2KeyName, publicDNS)
+		log.Infof("Client EC2 instance created with ID: %s", instanceID)
+		log.Infof("Public DNS: %s", publicDNS)
+		log.Infof("Login command: ssh -i %s.pem ec2-user@%s", ec2KeyName, publicDNS)
 	case "delete-client":
 		if ec2InstanceID == "" {
 			log.Fatalf("For 'create-client' action, --ec2-instance-id is required")
@@ -171,37 +226,40 @@ func main() {
 		if err != nil {
 			log.Fatalf("Run sysbench perftest Error: %v", err)
 		}
+	case "modify-dbinstance-type":
+		if clusterID == "" || dbInstanceClass == "" {
+			log.Fatalf("For 'modify-dbinstance-type action', --cluster-id and --ec2InstanceType are required")
+		}
+		err := ModifyAuroraInstanceType(clusterID, dbInstanceClass)
+		if err != nil {
+			log.Fatalf("Change Aurora cluster %s db-instance to %s failed: %v", clusterID, ec2InstanceType, err)
+		}
 	case "assume-role":
 		if roleSession == "" {
-			log.Fatal("For 'assume-role' action, --role-session is required")
+			log.Fatalf("For 'assume-role' action, --role-session is required")
 		}
-		_, err := assumeRole(roleARN, "full-manager-service-role", 3600)
-		if err != nil {
-			log.Fatalf("failed to asume role: %v\n", err)
-		}
-		// 每隔10分钟调用AssumeRole获取新的临时凭证
-		ticker := time.NewTicker(10 * time.Minute)
+		// 每隔20分钟调用AssumeRole获取新的临时凭证
+		ticker := time.NewTicker(20 * time.Minute)
 		defer ticker.Stop()
-
 		for {
 			select {
 			case <-ticker.C:
-				// 获取新的临时凭证,将新的临时凭证写入 ~/.aws/credentials 文件
+				// 获取新的临时凭证,将新的临时凭证1h写入 ~/.aws/credentials 文件
 				creds, err := assumeRole(roleARN, roleSession, 3600)
 				if err != nil {
-					log.Printf("Error renewing credentials: %v\n", err)
+					log.Printf("Error renewing credentials: %v", err)
 					continue
 				}
 				err = WriteCredentialsToFile(creds)
 				if err != nil {
-					log.Printf("Error writing credentials to file: %v\n", err)
+					log.Printf("Error writing credentials to file: %v", err)
 					continue
 				}
-				log.Printf("Credentials renewed. New expiration: %s\n", creds.Expiration)
+				log.Printf("Credentials renewed. New expiration: %s", creds.Expiration)
 			}
 		}
 	default:
-		log.Fatalf("Invalid action: %s. Use 'create-rds', 'delete-rds', 'modify-params', 'create-client','init-perftest-env','prepare-data','perftest-run', 'assume-role'", action)
+		log.Fatalf("Invalid action: %s. Use 'create-rds', 'delete-rds', 'modify-params', 'create-client','init-perftest-env','prepare-data','perftest-run','modify-dbinstance-type','assume-role'", action)
 	}
 }
 
@@ -234,26 +292,12 @@ func createResources(client *rds.Client, clusterID, instanceID, paramGroupName, 
 	}
 
 	// 轮询集群状态，直到状态为 available 表示创建完成，超时时间10分钟
-	startTime := time.Now()
-	retries := 0
-	for {
-		clusterStatus, err := CheckClusterStatus(clusterID)
-		if err != nil {
-			log.Fatalf("error checking cluster status: %v", err)
-		}
-
-		fmt.Printf("Cluster %s status: %s\n", clusterID, clusterStatus)
-
-		if clusterStatus == "available" || retries == 60 {
-			duration := time.Since(startTime)
-			fmt.Printf("Cluster %s is available and ready to use, time cost: %v\n", clusterID, duration)
-			break
-		}
-		retries++
-
-		time.Sleep(10 * time.Second)
+	err = PollResourceStatus(clusterID, ResourceTypeAuroraCluster, "available", 10*time.Minute, CheckClusterStatus)
+	if err != nil {
+		log.Fatalf("Failed to create Aurora cluster %s: %v", clusterID, err)
 	}
-	fmt.Printf("Aurora cluster created: %v\n", createClusterOutput)
+
+	log.Infof("Aurora cluster created: %v", createClusterOutput)
 
 	// 创建Aurora数据库实例
 	createInstanceInput := &rds.CreateDBInstanceInput{
@@ -270,33 +314,18 @@ func createResources(client *rds.Client, clusterID, instanceID, paramGroupName, 
 	}
 
 	// 轮询实例状态，直到状态为 available 表示创建完成，超时时间10分钟
-	retries = 0
-	startTime = time.Now()
-	for {
-		instanceStatus, err := CheckDBInstanceStatus(instanceID)
-		if err != nil {
-			log.Fatalf("error checking cluster instance status: %v", err)
-		}
-
-		fmt.Printf("Cluster instance %s status: %s\n", instanceID, instanceStatus)
-
-		if instanceStatus == "available" || retries == 60 {
-			duration := time.Since(startTime)
-			fmt.Printf("Cluster instance %s is available and ready to use, time cost: %v\n", instanceID, duration)
-			break
-		}
-		retries++
-
-		time.Sleep(10 * time.Second)
+	err = PollResourceStatus(instanceID, ResourceTypeAuroraInstance, "available", 10*time.Minute, CheckDBInstanceStatus)
+	if err != nil {
+		log.Fatalf("Failed to create Aurora instance %s: %v", instanceID, err)
 	}
 
-	fmt.Printf("Aurora instance created: %v\n", createInstanceOutput)
+	log.Infof("Aurora instance created: %v", createInstanceOutput)
 
 	err = CreateDBClusterParameterGroup(client, paramGroupName, paramterDescription, parameterGroupFamily)
 	if err != nil {
 		log.Fatalf("Failed to create Aurora cluster parameter group, %v", err)
 	}
-	fmt.Printf("DBClusterParameterGroup created: %s\n", paramGroupName)
+	log.Infof("DBClusterParameterGroup created: %s", paramGroupName)
 }
 
 func CreateDBInstanceForCluster(clusterID, instanceID, instanceClass string) error {
@@ -321,7 +350,7 @@ func CreateDBInstanceForCluster(clusterID, instanceID, instanceClass string) err
 		return fmt.Errorf("failed to create DB instance %s for cluster %s: %v", instanceID, clusterID, err)
 	}
 
-	fmt.Printf("Successfully created DB instance %s for cluster %s: %v\n", instanceID, clusterID, resp)
+	log.Infof("Successfully created DB instance %s for cluster %s: %v", instanceID, clusterID, resp)
 	return nil
 }
 
@@ -338,12 +367,13 @@ func CreateDBClusterParameterGroup(client *rds.Client, paramGroupName, paramterD
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) {
 			if apiErr.ErrorCode() == "DBClusterParameterGroupAlreadyExistsFault" {
-				fmt.Printf("Parameter group %s already exists.\n", paramGroupName)
+				log.Warnf("Parameter group %s already exists, retcode: %s", paramGroupName, apiErr.ErrorCode())
 				return nil // 如果已存在，直接返回
 			}
 		}
 		return err
 	}
+	GreenInfof("Aurora-Parameter-Group %s created successfully", paramGroupName)
 	return nil
 }
 
@@ -366,7 +396,7 @@ func modifyClusterParameters(client *rds.Client, clusterID, paramGroupName strin
 	if err != nil {
 		log.Fatalf("Failed to modify DBClusterParameterGroup, %v", err)
 	}
-	fmt.Printf("DBClusterParameterGroup modified: %s set to %s\n", paramName, paramValue)
+	log.Infof("DBClusterParameterGroup modified: %s set to %s", paramName, paramValue)
 
 	// 将新参数组关联到数据库集群
 	modifyDBClusterInput := &rds.ModifyDBClusterInput{
@@ -378,11 +408,13 @@ func modifyClusterParameters(client *rds.Client, clusterID, paramGroupName strin
 	if err != nil {
 		log.Fatalf("Failed to modify DBCluster, %v", err)
 	}
-	fmt.Printf("DBCluster modified to use new parameter group: %s\n", paramGroupName)
+	log.Infof("DBCluster modified to use new parameter group: %s", paramGroupName)
 }
 
 func deleteResources(client *rds.Client, clusterID, instanceID, paramGroupName string) {
 	var skipFinalSnapshot bool = true
+	var apiErr smithy.APIError
+	//var aerr awserr.Error
 
 	// 删除Aurora数据库实例
 	deleteInstanceInput := &rds.DeleteDBInstanceInput{
@@ -392,33 +424,21 @@ func deleteResources(client *rds.Client, clusterID, instanceID, paramGroupName s
 
 	_, err := client.DeleteDBInstance(context.TODO(), deleteInstanceInput)
 	if err != nil {
-		var aerr awserr.Error
-		if errors.As(err, &aerr) && aerr.Code() != "DBInstanceNotFound" {
-			log.Fatalf("Failed to delete Aurora instance, %v", err)
+		if errors.As(err, &apiErr) {
+			if apiErr.ErrorCode() != "DBInstanceNotFound" {
+				log.Fatalf("Failed to delete Aurora instance, %v", err)
+			}
+			log.Warnf("Aurora db-instance %s already deleted, retcode: %s", instanceID, apiErr.ErrorCode())
 		}
 	}
 
 	// 轮询实例状态，直到状态为 deleted 表示创建完成，超时时间20分钟
-	startTime := time.Now()
-	retries := 0
-	for {
-		instanceStatus, err := CheckDBInstanceStatus(instanceID)
-		if err != nil {
-			log.Fatalf("error checking cluster instance status: %v", err)
-		}
-
-		fmt.Printf("Cluster instance %s status: %s\n", instanceID, instanceStatus)
-
-		if instanceStatus == "deleted" || retries == 120 {
-			duration := time.Since(startTime)
-			fmt.Printf("Cluster instance %s is deleted, time cost: %v\n", instanceID, duration)
-			break
-		}
-		retries++
-		time.Sleep(10 * time.Second)
+	err = PollResourceStatus(instanceID, ResourceTypeAuroraInstance, "deleted", 20*time.Minute, CheckDBInstanceStatus)
+	if err != nil {
+		log.Fatalf("Failed to delete Aurora instance %s: %v", instanceID, err)
 	}
 
-	fmt.Printf("Aurora instance deleted: %v\n", instanceID)
+	log.Infof("Aurora instance deleted: %v", instanceID)
 
 	// 删除Aurora集群
 	deleteClusterInput := &rds.DeleteDBClusterInput{
@@ -428,32 +448,20 @@ func deleteResources(client *rds.Client, clusterID, instanceID, paramGroupName s
 
 	_, err = client.DeleteDBCluster(context.TODO(), deleteClusterInput)
 	if err != nil {
-		var aerr awserr.Error
-		if errors.As(err, &aerr) && aerr.Code() != "DBClusterNotFoundFault" {
-			log.Fatalf("Failed to delete Aurora cluster, %v", err)
+		if errors.As(err, &apiErr) {
+			if apiErr.ErrorCode() != "DBClusterNotFoundFault" {
+				log.Fatalf("Failed to delete Aurora cluster, %v", err)
+			}
+			log.Warnf("Aurora cluster %s already deleted, retcode: %s", clusterID, apiErr.ErrorCode())
 		}
 	}
 
 	// 轮询集群状态，直到状态为 deleted 表示创建完成，超时时间10分钟
-	retries = 0
-	startTime = time.Now()
-	for {
-		clusterStatus, err := CheckClusterStatus(clusterID)
-		if err != nil {
-			log.Fatalf("error checking cluster status: %v", err)
-		}
-
-		fmt.Printf("Cluster %s status: %s\n", clusterID, clusterStatus)
-
-		if clusterStatus == "deleted" || retries == 120 {
-			duration := time.Since(startTime)
-			fmt.Printf("Cluster %s is deleted, time cost: %v\n", clusterID, duration)
-			break
-		}
-		retries++
-		time.Sleep(10 * time.Second)
+	err = PollResourceStatus(clusterID, ResourceTypeAuroraCluster, "deleted", 10*time.Minute, CheckClusterStatus)
+	if err != nil {
+		log.Fatalf("Failed to delete Aurora cluster %s: %v", clusterID, err)
 	}
-	fmt.Printf("Aurora cluster deleted: %v\n", clusterID)
+	log.Infof("Aurora cluster deleted: %v", clusterID)
 
 	// 删除参数组
 	deleteParamGroupInput := &rds.DeleteDBClusterParameterGroupInput{
@@ -462,16 +470,18 @@ func deleteResources(client *rds.Client, clusterID, instanceID, paramGroupName s
 
 	_, err = client.DeleteDBClusterParameterGroup(context.TODO(), deleteParamGroupInput)
 	if err != nil {
-		log.Fatalf("Failed to delete DBClusterParameterGroup, %v", err)
+		if errors.As(err, &apiErr) {
+			if apiErr.ErrorCode() != "DBParameterGroupNotFound" {
+				log.Fatalf("Failed to delete DBClusterParameterGroup, %v", err)
+			}
+			log.Warnf("Aurora cluster parameter group %s already deleted, retcode: %s", paramGroupName, apiErr.ErrorCode())
+		}
 	}
-	fmt.Printf("DBClusterParameterGroup deleted: %s\n", paramGroupName)
+	log.Infof("DBClusterParameterGroup deleted: %s", paramGroupName)
 }
 
 func createClientEC2(rdsClient *rds.Client, ec2Client *ec2.Client, clusterID, instanceType, imageID, keyName string) (string, string, error) {
-	var ec2Count int32 = 1
-	var ec2NameKey string = "Name"
-	var ec2NameValue string = "aurora-perftest-client"
-	// 获取Aurora集群的VPC ID
+	// 获取Aurora集群的VPC-ID
 	vpcID, err := getAuroraClusterVPC(rdsClient, clusterID)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to get Aurora cluster VPC: %v", err)
@@ -485,20 +495,19 @@ func createClientEC2(rdsClient *rds.Client, ec2Client *ec2.Client, clusterID, in
 	}
 
 	// 获取默认子网
-
-	subnetID, err := getDefaultSubnet(ec2Client, vpcID)
+	subnetID, err := getAuroraClusterFirstInstanceSubnet(rdsClient, clusterID)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to get default subnet: %v", err)
+		return "", "", fmt.Errorf("failed to get RDS instance subnet: %v", err)
 	}
 
 	// 创建EC2实例
 	runInstancesInput := &ec2.RunInstancesInput{
-		ImageId:      &imageID,
+		ImageId:      aws.String(imageID),
 		InstanceType: ec2type.InstanceType(instanceType),
-		KeyName:      &keyName,
-		MinCount:     &ec2Count,
-		MaxCount:     &ec2Count,
-		SubnetId:     &subnetID,
+		KeyName:      aws.String(keyName),
+		MinCount:     aws.Int32(1),
+		MaxCount:     aws.Int32(1),
+		SubnetId:     aws.String(subnetID),
 		SecurityGroupIds: []string{
 			securityGroupID,
 		},
@@ -507,8 +516,8 @@ func createClientEC2(rdsClient *rds.Client, ec2Client *ec2.Client, clusterID, in
 				ResourceType: "instance",
 				Tags: []ec2type.Tag{
 					{
-						Key:   &ec2NameKey,
-						Value: &ec2NameValue,
+						Key:   aws.String("Name"),
+						Value: aws.String("aurora-perftest-client"),
 					},
 				},
 			},
@@ -519,36 +528,41 @@ func createClientEC2(rdsClient *rds.Client, ec2Client *ec2.Client, clusterID, in
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create EC2 instance: %v", err)
 	}
-	fmt.Printf("EC2 instance created: %v\n", runInstancesOutput)
+	log.Infof("EC2 instance created: %v", runInstancesOutput)
 
 	// 获取实例ID
-	instanceID := runInstancesOutput.Instances[0].InstanceId
-	fmt.Printf("EC2 instance ID: %s\n", *instanceID)
+	ec2InstanceID := aws.ToString(runInstancesOutput.Instances[0].InstanceId)
+	log.Infof("EC2 instance ID: %s", ec2InstanceID)
 
 	// 等待实例运行
-	waiter := ec2.NewInstanceRunningWaiter(ec2Client)
-	err = waiter.Wait(context.TODO(), &ec2.DescribeInstancesInput{
-		InstanceIds: []string{*instanceID},
-	}, 10*time.Minute)
+	// waiter := ec2.NewInstanceRunningWaiter(ec2Client)
+	// err = waiter.Wait(context.TODO(), &ec2.DescribeInstancesInput{
+	// 	InstanceIds: []string{*instanceID},
+	// }, 10*time.Minute)
+	// if err != nil {
+	// 	return "", "", fmt.Errorf("failed to wait for EC2 instance to run: %v", err)
+	// }
+	err = PollResourceStatus(ec2InstanceID, ResourceTypeEC2Instance, "running", 10*time.Minute, CheckEC2InstanceStatus)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to wait for EC2 instance to run: %v", err)
+		return "", "", fmt.Errorf("EC2 instance %s created failed", ec2InstanceID)
 	}
-	fmt.Printf("EC2 instance is running: %s\n", *instanceID)
+
+	log.Infof("EC2 instance is running: %s", ec2InstanceID)
 
 	// 获取实例的公有DNS名称
 	describeInstancesInput := &ec2.DescribeInstancesInput{
-		InstanceIds: []string{*instanceID},
+		InstanceIds: []string{ec2InstanceID},
 	}
 	instancesOutput, err := ec2Client.DescribeInstances(context.TODO(), describeInstancesInput)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to describe instances: %v", err)
 	}
-	publicDNS := instancesOutput.Reservations[0].Instances[0].PublicDnsName
-	if publicDNS == nil {
-		return "", "", fmt.Errorf("public DNS name not found for instance %s", *instanceID)
+	publicDNS := aws.ToString(instancesOutput.Reservations[0].Instances[0].PublicDnsName)
+	if publicDNS == "" {
+		return "", "", fmt.Errorf("public DNS name not found for instance %s", ec2InstanceID)
 	}
 
-	return *instanceID, *publicDNS, nil
+	return ec2InstanceID, publicDNS, nil
 }
 
 func getAuroraClusterVPC(client *rds.Client, clusterID string) (string, error) {
@@ -657,27 +671,91 @@ func getDefaultSubnet(client *ec2.Client, vpcID string) (string, error) {
 	return *subnetsOutput.Subnets[0].SubnetId, nil
 }
 
-func deleteClientEC2(ec2Client *ec2.Client, instanceID string) error {
+// getAuroraClusterFirstInstanceSubnet 获取Aurora集群中第一个实例的子网ID
+func getAuroraClusterFirstInstanceSubnet(rdsClient *rds.Client, clusterID string) (string, error) {
+	// 获取Aurora集群的详细信息
+	clusterParams := &rds.DescribeDBClustersInput{
+		DBClusterIdentifier: &clusterID,
+	}
+	clusterResp, err := rdsClient.DescribeDBClusters(context.TODO(), clusterParams)
+	if err != nil {
+		return "", fmt.Errorf("failed to describe DBClusters: %v", err)
+	}
+
+	// 获取集群中的第一个数据库实例详细信息
+	if len(clusterResp.DBClusters) == 0 {
+		return "", fmt.Errorf("Aurora cluster %s not found", clusterID)
+	}
+	dbCluster := clusterResp.DBClusters[0]
+
+	// 获取集群中的第一个数据库实例ID
+	if len(dbCluster.DBClusterMembers) == 0 {
+		return "", fmt.Errorf("No database instances found in cluster %s", clusterID)
+	}
+	firstInstanceID := *dbCluster.DBClusterMembers[0].DBInstanceIdentifier
+
+	// 获取第一个数据库实例的详细信息
+	instanceParams := &rds.DescribeDBInstancesInput{
+		DBInstanceIdentifier: &firstInstanceID,
+	}
+	instanceResp, err := rdsClient.DescribeDBInstances(context.TODO(), instanceParams)
+	if err != nil {
+		return "", fmt.Errorf("failed to describe DB instance %s: %v", firstInstanceID, err)
+	}
+
+	// 提取子网ID
+	if len(instanceResp.DBInstances) == 0 {
+		return "", fmt.Errorf("DB instance %s not found", firstInstanceID)
+	}
+	subnetID := *instanceResp.DBInstances[0].DBSubnetGroup.Subnets[0].SubnetIdentifier
+
+	return subnetID, nil
+}
+
+// CheckEC2InstanceStatus 检查 EC2 实例的状态
+func CheckEC2InstanceStatus(ec2InstanceID string) (string, error) {
+	cfg, err := config.LoadDefaultConfig(context.TODO())
+	if err != nil {
+		return "", fmt.Errorf("unable to load AWS config: %v", err)
+	}
+	ec2Client := ec2.NewFromConfig(cfg)
+
+	// 调用 DescribeInstances 获取实例状态
+	resp, err := ec2Client.DescribeInstances(context.TODO(), &ec2.DescribeInstancesInput{
+		InstanceIds: []string{ec2InstanceID},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to describe EC2 instance %s: %v", ec2InstanceID, err)
+	}
+
+	if len(resp.Reservations) == 0 || len(resp.Reservations[0].Instances) == 0 {
+		return "", fmt.Errorf("no EC2 instance found with ID: %s", ec2InstanceID)
+	}
+
+	instance := resp.Reservations[0].Instances[0]
+	state := string(instance.State.Name)
+
+	return state, nil
+}
+
+func deleteClientEC2(ec2Client *ec2.Client, ec2InstanceID string) error {
 	// 终止EC2实例
 	terminateInstancesInput := &ec2.TerminateInstancesInput{
-		InstanceIds: []string{instanceID},
+		InstanceIds: []string{ec2InstanceID},
 	}
 
 	terminateInstancesOutput, err := ec2Client.TerminateInstances(context.TODO(), terminateInstancesInput)
 	if err != nil {
 		return fmt.Errorf("failed to terminate EC2 instance: %v", err)
 	}
-	fmt.Printf("EC2 instance terminated: %v\n", terminateInstancesOutput)
+	log.Infof("Begin to delete EC2 instance: %v", terminateInstancesOutput)
 
-	// 等待实例终止
-	waiter := ec2.NewInstanceTerminatedWaiter(ec2Client)
-	err = waiter.Wait(context.TODO(), &ec2.DescribeInstancesInput{
-		InstanceIds: []string{instanceID},
-	}, 10*time.Minute)
+	// 等待实例终止，超时10分钟
+	err = PollResourceStatus(ec2InstanceID, ResourceTypeEC2Instance, "terminated", 10*time.Minute, CheckEC2InstanceStatus)
 	if err != nil {
-		return fmt.Errorf("failed to wait for EC2 instance to terminate: %v", err)
+		return fmt.Errorf("EC2 instance %s deleted failed", ec2InstanceID)
 	}
-	fmt.Printf("EC2 instance is terminated: %s\n", instanceID)
+	log.Infof("EC2 instance is terminated: %s", ec2InstanceID)
 
 	return nil
 }
