@@ -81,7 +81,7 @@ bin/aurora-vs-TiDB --action=create-rds --cluster-id=Aurora-v3060-perftest --inst
 
 #### Restore an RDS Aurora Cluster from mysql snapshot
 ```bash
-bin/aurora-vs-TiDB --action=create-rds --cluster-id=Aurora-v3060-perftest --instance-id=Aurora-v3060-perftest-instance --param-group-name=my-custom-aurora-mysql80
+bin/aurora-vs-TiDB --action=prepare-data --restore --cluster-id=Aurora-v3060-perftest --instance-class=db.r6g.4xlarge
 ```
 
 #### Modify Aurora Cluster Parameters
@@ -99,19 +99,24 @@ bin/aurora-vs-TiDB --action=delete-rds --cluster-id=Aurora-v3060-perftest --inst
 bin/aurora-vs-TiDB --action=create-client-ec2 --ec2-instance-type=m5.2xlarge 
 ```
 
+#### Delete an EC2 Client Instance
+```bash
+bin/aurora-vs-TiDB --action=delete-client-ec2 --ec2-instance-id=i-1234567890abcdef0
+```
+
 #### Initialize Performance Test Environment
 ```bash
-bin/aurora-vs-TiDB--action init-perftest-env --ec2-instance-id i-1234567890abcdef0
+bin/aurora-vs-TiDB --action=init-perftest-env --ec2-instance-id=i-1234567890abcdef0
 ```
 
 #### Prepare Data for Sysbench
 ```bash
-bin/aurora-vs-TiDB --action prepare-data --ec2-instance-id i-1234567890abcdef0 --cluster-id Aurora-v3060-perftest
+bin/aurora-vs-TiDB --action=prepare-data --ec2-instance-id=i-1234567890abcdef0 --cluster-id=Aurora-v3060-perftest
 ```
 
 #### Run Sysbench Performance Test
 ```bash
-bin/aurora-vs-TiDB --action perftest-run --ec2-instance-id i-1234567890abcdef0 --cluster-id Aurora-v3060-perftest --perf-type oltp_read_write
+bin/aurora-vs-TiDB --action=perftest-run --ec2-instance-id=i-1234567890abcdef0 --cluster-id=Aurora-v3060-perftest --perf-type=oltp_read_write
 ```
 
 ## Code Structure
