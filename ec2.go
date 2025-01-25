@@ -38,6 +38,7 @@ func CreateClientEC2(ctx context.Context, clusterID, instanceType, imageID, keyN
 		return "", "", fmt.Errorf("failed to get RDS instance subnet: %v", err)
 	}
 
+	log.Infof("begin to create ec2 instance, type %s", instanceType)
 	// 创建EC2实例
 	runInstancesInput := &ec2.RunInstancesInput{
 		ImageId:      aws.String(imageID),

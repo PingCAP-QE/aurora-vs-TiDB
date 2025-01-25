@@ -127,7 +127,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 
-	err := initializeCredentials()
+	err := initializeCredentials(ctx, roleARN, roleSession)
 	if err != nil {
 		log.Fatalf("AWS ak/sk/token not config, exit")
 	}
@@ -138,7 +138,7 @@ func main() {
 	initDone := make(chan bool)
 
 	go func() {
-		refreshCredentials(ctx, &wg, roleARN, roleSession, 10*time.Minute, initDone)
+		RefreshCredentials(ctx, &wg, 5*time.Minute, initDone)
 	}()
 	<-initDone
 
@@ -258,23 +258,12 @@ func main() {
 		}
 	case "assume-role":
 		// 每隔20分钟调用AssumeRole获取新的临时凭证
-		ticker := time.NewTicker(20 * time.Minute)
+		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				// 获取新的临时凭证,将新的临时凭证1h写入 ~/.aws/credentials 文件
-				creds, err := assumeRole(ctx, roleARN, roleSession, 3600)
-				if err != nil {
-					log.Printf("Error renewing credentials: %v", err)
-					continue
-				}
-				err = WriteCredentialsToFile(creds)
-				if err != nil {
-					log.Printf("Error writing credentials to file: %v", err)
-					continue
-				}
-				log.Printf("Credentials renewed. New expiration: %s", creds.Expires)
+				log.Printf("Get lastest credentials. New expiration: %s", gCredentialsData.Expires)
 			}
 		}
 	default:

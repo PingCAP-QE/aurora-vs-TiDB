@@ -24,7 +24,7 @@ EC2_CLIENT_INSTANCE_TYPE="m5.4xlarge"
 echo -e "Creating client EC2 instance with type $EC2_CLIENT_INSTANCE_TYPE..."
 CMD="$TOOL_PATH --action=create-client --cluster-id=$PERFTEST_CLUSTER_NAME --ec2-instance-type=$EC2_CLIENT_INSTANCE_TYPE"
 echo -e "Running: $CMD"
-ec2_instance_id=$($TOOL_PATH --action=create-client --cluster-id="$PERFTEST_CLUSTER_NAME" 2>&1 | tee /dev/tty | awk -F': ' '/EC2 instance ID/ {print $2}')
+ec2_instance_id=$($TOOL_PATH --action=create-client --cluster-id="$PERFTEST_CLUSTER_NAME"  --ec2-instance-type="$EC2_CLIENT_INSTANCE_TYPE" 2>&1 | tee /dev/tty | awk -F': ' '/EC2 instance ID/ {print $2}')
 ec2_instance_id=$(echo -n "$ec2_instance_id" | sed 's/\x1b\[[0-9;]*m//g')
 
 echo -e "EC2 instance created with ID: $ec2_instance_id"
@@ -94,4 +94,4 @@ echo -e "Deleting Aurora cluster/instance/paramter-group..."
 CMD="$TOOL_PATH --action=delete-rds --cluster-id=$PERFTEST_CLUSTER_NAME--instance-id=$PERFTEST_CLUSTER_NAME-instance --param-group-name=my-custom-aurora-mysql80"
 echo -e "Running: $CMD"
 $CMD
-echo -e "Clean testing resource and environment completed."
+echo -e "Clean testing resource and environment  completed."

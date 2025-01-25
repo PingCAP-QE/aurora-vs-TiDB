@@ -81,3 +81,8 @@ func cancelAndWait(cancel context.CancelFunc, wg *sync.WaitGroup) {
 	cancel()
 	wg.Wait()
 }
+
+func AreTimesEqual(t1, t2 time.Time) bool {
+	isEqual := t1.Equal(t2)
+	return isEqual
+}
