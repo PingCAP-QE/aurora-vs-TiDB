@@ -83,6 +83,7 @@ func main() {
 		ec2KeyName         string
 		perfType           string
 		roleARN            string
+		rstPath            string
 		restore            bool
 		//tokenExpiration    int32
 		roleSession string
@@ -102,6 +103,8 @@ func main() {
 	pflag.StringVarP(&perfType, "perf-type", "o", "", "Sysbench oltp perf type:oltp_read_only/oltp_read_write/oltp_write_only")
 	pflag.StringVarP(&roleARN, "role-arn", "r", "arn:aws:iam::986330900858:role/full-manager-service-role", "aws login account roleARN (default: arn:aws:iam::986330900858:role/full-manager-service-role)")
 	pflag.StringVarP(&roleSession, "role-session", "n", "full-manager-service-role", "aws login account role session name (default: full-manager-service-role)")
+	pflag.StringVarP(&rstPath, "results-path", "l", "results", "pertests results path (default: results)")
+
 	pflag.Parse()
 
 	// set log-level and format
@@ -265,6 +268,23 @@ func main() {
 			case <-ticker.C:
 				log.Printf("Get lastest credentials. New expiration: %s", gCredentialsData.Expires)
 			}
+		}
+	case "parse-results":
+		/* 		var results []BenchmarkResult
+		   		rst1, err := ParseBenchmarkLog("results/db.r6g.4xlarge-oltp_read_only.log")
+		   		rst2, err := ParseBenchmarkLog("results/db.r7g.4xlarge-oltp_read_only.log")
+
+		   		if err != nil {
+		   			log.Errorf("Parser aurora perftest result failed: %v", err)
+		   		}
+		   		log.Infof("benchmark result: %v", rst1)
+		   		results = append(results, rst1)
+		   		results = append(results, rst2)
+
+		   		PrintResults(results, "tps", "oltp-read-only") */
+		err := ParseAndPrintAllResults(rstPath)
+		if err != nil {
+			log.Errorf("failed to parser and print aurora performance test result, %v", err)
 		}
 	default:
 		log.Errorf("Invalid action: %s. Use 'create-rds', 'delete-rds', 'modify-params', 'create-client','init-perftest-env','prepare-data','perftest-run','modify-dbinstance-type','assume-role'", action)
