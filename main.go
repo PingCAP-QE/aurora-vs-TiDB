@@ -138,7 +138,7 @@ func main() {
 	initDone := make(chan bool)
 
 	go func() {
-		RefreshCredentials(ctx, &wg, 5*time.Minute, initDone)
+		RefreshCredentials(ctx, &wg, roleARN, roleSession, 5*time.Minute, initDone)
 	}()
 	<-initDone
 

@@ -22,9 +22,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
-// 自定义凭证提供者
-type DynamicProvider struct{}
-
 // 全局共享的凭证变量
 var (
 	gCredsProvider   *aws.CredentialsCache
@@ -47,19 +44,121 @@ func initializeCredentials(ctx context.Context, roleARN, sessionName string) err
 	if err != nil {
 		log.Fatalf("Failed to get caller identity: %v", err)
 	}
-	GreenInfof("Account: %s, Role-ARN: %s\n", *identity.Account, *identity.Arn)
+	GreenInfof("Account: %s, Role-ARN: %s", *identity.Account, *identity.Arn)
 
-	// 使用 stscreds.AssumeRoleProvider 初始化 gCredsProvider
+	// 使用 default config 配置的临时provider
 	assumeRoleProvider := stscreds.NewAssumeRoleProvider(stsClient, roleARN, func(o *stscreds.AssumeRoleOptions) {
 		o.RoleSessionName = sessionName
 		o.Duration = time.Hour
 	})
 	gCredsProvider = aws.NewCredentialsCache(assumeRoleProvider, func(options *aws.CredentialsCacheOptions) {
 		options.ExpiryWindow = 20 * time.Minute // 20分钟就要过期了，就会标记为刷新窗口期
-		options.ExpiryWindowJitterFrac = 0.1    // 防止多线程竞争，设置一个窗口，波动在 20 *0.1 = 2分钟内，提前20-22分就开始刷新
+		options.ExpiryWindowJitterFrac = 0.2    // 防止多线程竞争，设置一个窗口，波动在 20 *0.5 = 10分钟内，提前10-20分就开始刷新
 	})
 
 	return nil
+}
+
+// 获取和更新凭证的子函数，第二个返回值确定是否有更新，y代表更新了 creditals
+func refreshCredential(ctx context.Context, roleARN, sessionName string) (*aws.Credentials, bool, error) {
+	mutex.Lock()
+	//defer mutex.Unlock()
+	if gCredsProvider == nil {
+		return nil, false, fmt.Errorf("global credentials provider is not initialized")
+	}
+
+	cfg, err := getAWSConfigWithDynamicCredentials(ctx)
+	if err != nil {
+		log.Errorf("failed to load config from dynamic creditals provider: %v", err)
+	}
+	dynamicStsClient := sts.NewFromConfig(cfg)
+	assumeRoleProvider := stscreds.NewAssumeRoleProvider(dynamicStsClient, roleARN, func(o *stscreds.AssumeRoleOptions) {
+		o.RoleSessionName = sessionName
+		o.Duration = time.Hour // 设置最长有效期
+	})
+
+	// 更新全局凭证提供者
+	gCredsProvider = aws.NewCredentialsCache(assumeRoleProvider, func(options *aws.CredentialsCacheOptions) {
+		options.ExpiryWindow = 20 * time.Minute // 提前 5 分钟刷新
+		options.ExpiryWindowJitterFrac = 0.2    // 加入 10% 的随机抖动
+	})
+
+	lastExpiredTime := gCredentialsData.Expires
+	// 判断是否过期，用来获取新的临时凭证
+	creds, err := gCredsProvider.Retrieve(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to assume role: %v", err)
+	}
+	newExpiredTime := gCredentialsData.Expires
+	// 更新全局凭证提供程序
+	gCredentialsData = creds
+	log.Debugf("For debug, current creditials: %v", gCredentialsData)
+	//setAWSEnvironmentVariables(creds)
+	err = WriteCredentialsToFile(&creds)
+	mutex.Unlock()
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to write credentials to ~/.aws/credentials: %v", err)
+	}
+	if AreTimesEqual(lastExpiredTime, newExpiredTime) {
+		return &creds, false, nil
+	}
+	return &creds, true, nil
+}
+
+// refreshCredentials 定期刷新临时凭证并更新全局缓存
+func RefreshCredentials(ctx context.Context, wg *sync.WaitGroup, roleARN, sessionName string, interval time.Duration, initDone chan<- bool) {
+	defer func() {
+		GreenInfof("Refresh credentials process has exited gracefully.")
+		wg.Done() // 确保协程退出时调用 wg.Done()
+	}()
+
+	// 先刷新一次凭证防止第一次等待的10分钟内超时
+	creds, _, err := refreshCredential(ctx, roleARN, sessionName)
+	if err != nil {
+		log.Fatalf("failed to initialize credentials: %v", err)
+	}
+
+	// 通知主程序第一次凭证已获取
+	if initDone != nil {
+		initDone <- true
+	}
+	GreenInfof("Initial credentials fetched successfully. Expiration: %s", creds.Expires)
+
+	// 定时刷新凭证
+	for {
+		select {
+		case <-ctx.Done():
+			log.Infof("Context canceled, stopping refreshCredentials loop")
+			return
+		case <-time.After(interval):
+			creds, _, err := refreshCredential(ctx, roleARN, sessionName)
+			if err != nil {
+				log.Warnf("failed to refresh credentials: %v", err)
+			} else {
+				GreenInfof("Credentials refreshed successfully. New expiration: %s", creds.Expires)
+				//log.Infof("Credentials retrieved, no need to refresh. Current expiration: %s", creds.Expires)
+			}
+		}
+	}
+}
+
+// 返回使用动态凭证的 AWS 配置
+func getAWSConfigWithDynamicCredentials(ctx context.Context) (aws.Config, error) {
+
+	if gCredsProvider == nil {
+		return aws.Config{}, fmt.Errorf("credentials provider is not initialized")
+	}
+
+	// 返回 AWS 配置，绑定动态凭证提供程序
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion("us-west-2"),
+		config.WithCredentialsProvider(gCredsProvider),
+	)
+	if err != nil {
+		return aws.Config{}, fmt.Errorf("failed to load AWS config: %v", err)
+	}
+
+	return cfg, nil
 }
 
 func assumeRole(ctx context.Context, roleArn, sessionName string, duration int32) (*aws.Credentials, error) {
@@ -240,89 +339,6 @@ func generateExportCommands(creds aws.Credentials) {
 	if creds.SessionToken != "" {
 		fmt.Printf("export AWS_SESSION_TOKEN=%s\n", creds.SessionToken)
 	}
-}
-
-// 获取和更新凭证的子函数，第二个返回值确定是否有更新，y代表更新了 creditals
-func refreshCredential(ctx context.Context, crsRefresherProvider *aws.CredentialsCache) (*aws.Credentials, bool, error) {
-	lastExpiredTime := gCredentialsData.Expires
-	// 判断是否过期，用来获取新的临时凭证
-	creds, err := crsRefresherProvider.Retrieve(ctx)
-	if err != nil {
-		return nil, false, fmt.Errorf("failed to assume role: %v", err)
-	}
-	newExpiredTime := gCredentialsData.Expires
-	// 更新全局凭证提供程序
-	mutex.Lock()
-	gCredentialsData = creds
-	log.Debugf("For debug, current creditials: %v", gCredentialsData)
-	//setAWSEnvironmentVariables(creds)
-	err = WriteCredentialsToFile(&creds)
-	mutex.Unlock()
-	if err != nil {
-		return nil, false, fmt.Errorf("failed to write credentials to ~/.aws/credentials: %v", err)
-	}
-	if AreTimesEqual(lastExpiredTime, newExpiredTime) {
-		return &creds, false, nil
-	}
-	return &creds, true, nil
-}
-
-// refreshCredentials 定期刷新临时凭证并更新全局缓存
-func RefreshCredentials(ctx context.Context, wg *sync.WaitGroup, interval time.Duration, initDone chan<- bool) {
-	defer func() {
-		GreenInfof("Refresh credentials process has exited gracefully.")
-		wg.Done() // 确保协程退出时调用 wg.Done()
-	}()
-
-	// 先刷新一次凭证防止第一次等待的10分钟内超时
-	creds, _, err := refreshCredential(ctx, gCredsProvider)
-	if err != nil {
-		log.Fatalf("failed to initialize credentials: %v", err)
-	}
-
-	// 通知主程序第一次凭证已获取
-	if initDone != nil {
-		initDone <- true
-	}
-	GreenInfof("Initial credentials fetched successfully. Expiration: %s", creds.Expires)
-
-	// 定时刷新凭证
-	for {
-		select {
-		case <-ctx.Done():
-			log.Infof("Context canceled, stopping refreshCredentials loop")
-			return
-		case <-time.After(interval):
-			creds, refreshFlag, err := refreshCredential(ctx, gCredsProvider)
-			if err != nil {
-				log.Warnf("failed to refresh credentials: %v", err)
-			} else {
-				if refreshFlag {
-					GreenInfof("Credentials refreshed successfully. New expiration: %s", creds.Expires)
-				}
-				log.Infof("Credentials retrieved, no need to refresh. Current expiration: %s", creds.Expires)
-			}
-		}
-	}
-}
-
-// 返回使用动态凭证的 AWS 配置
-func getAWSConfigWithDynamicCredentials(ctx context.Context) (aws.Config, error) {
-
-	if gCredsProvider == nil {
-		return aws.Config{}, fmt.Errorf("credentials provider is not initialized")
-	}
-
-	// 返回 AWS 配置，绑定动态凭证提供程序
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion("us-west-2"),
-		config.WithCredentialsProvider(gCredsProvider),
-	)
-	if err != nil {
-		return aws.Config{}, fmt.Errorf("failed to load AWS config: %v", err)
-	}
-
-	return cfg, nil
 }
 
 // attachPolicyToRole 将指定的IAM策略附加到指定的IAM角色。
