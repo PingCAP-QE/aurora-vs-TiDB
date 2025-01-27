@@ -62,7 +62,6 @@ func initializeCredentials(ctx context.Context, roleARN, sessionName string) err
 // 获取和更新凭证的子函数，第二个返回值确定是否有更新，y代表更新了 creditals
 func refreshCredential(ctx context.Context, roleARN, sessionName string) (*aws.Credentials, bool, error) {
 	mutex.Lock()
-	//defer mutex.Unlock()
 	if gCredsProvider == nil {
 		return nil, false, fmt.Errorf("global credentials provider is not initialized")
 	}
@@ -74,26 +73,24 @@ func refreshCredential(ctx context.Context, roleARN, sessionName string) (*aws.C
 	dynamicStsClient := sts.NewFromConfig(cfg)
 	assumeRoleProvider := stscreds.NewAssumeRoleProvider(dynamicStsClient, roleARN, func(o *stscreds.AssumeRoleOptions) {
 		o.RoleSessionName = sessionName
-		o.Duration = time.Hour // 设置最长有效期
+		o.Duration = time.Hour
 	})
 
 	// 更新全局凭证提供者
 	gCredsProvider = aws.NewCredentialsCache(assumeRoleProvider, func(options *aws.CredentialsCacheOptions) {
-		options.ExpiryWindow = 20 * time.Minute // 提前 5 分钟刷新
-		options.ExpiryWindowJitterFrac = 0.2    // 加入 10% 的随机抖动
+		options.ExpiryWindow = 20 * time.Minute
+		options.ExpiryWindowJitterFrac = 0.2
 	})
 
 	lastExpiredTime := gCredentialsData.Expires
-	// 判断是否过期，用来获取新的临时凭证
 	creds, err := gCredsProvider.Retrieve(ctx)
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to assume role: %v", err)
 	}
 	newExpiredTime := gCredentialsData.Expires
-	// 更新全局凭证提供程序
 	gCredentialsData = creds
 	log.Debugf("For debug, current creditials: %v", gCredentialsData)
-	//setAWSEnvironmentVariables(creds)
+
 	err = WriteCredentialsToFile(&creds)
 	mutex.Unlock()
 	if err != nil {

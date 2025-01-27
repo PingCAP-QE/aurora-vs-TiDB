@@ -64,7 +64,7 @@ func ParseBenchmarkLog(filePath string) (BenchmarkResult, error) {
 		return BenchmarkResult{}, fmt.Errorf("invalid file name format: %s", filePath)
 	}
 	machineType, testType := match[1], match[2]
-	log.Infof("machine-type:%s, test-tyep:%s", machineType, testType)
+	log.Infof("machine-type:%s, test-type:%s", machineType, testType)
 
 	result := BenchmarkResult{
 		MachineType: machineType,
@@ -110,15 +110,19 @@ func ParseBenchmarkLog(filePath string) (BenchmarkResult, error) {
 	if scanner.Err() != nil {
 		return BenchmarkResult{}, fmt.Errorf("error while read file: %v", scanner.Err())
 	}
+	log.Debugf("%v", result)
 	return result, nil
 }
 
 // 通用metrics的打印函数
 func PrintResults(results []BenchmarkResult, metricName, testType string) {
-	fmt.Print("-----------------------------------------------------------------------------------------------\n")
+	log.Debugf("%v", results)
+	fmt.Print("-------------------------------------------------------------------------------\n")
 	fmt.Printf("Aurora Performance Test Result Summary (%s)  ######  %s\n", testType, strings.ToUpper(metricName))
-	fmt.Print("-----------------------------------------------------------------------------------------------\n")
+	fmt.Print("-------------------------------------------------------------------------------\n")
 	fmt.Print("Threads\t")
+
+	sortBenchmarkResultsByMachine(results)
 	for _, result := range results {
 		fmt.Printf("%s\t", result.MachineType)
 	}
@@ -163,12 +167,50 @@ func PrintResults(results []BenchmarkResult, metricName, testType string) {
 		}
 		fmt.Println()
 	}
-	fmt.Print("-----------------------------------------------------------------------------------------------\n")
+	//fmt.Print("-------------------------------------------------------------------------------\n")
+}
+
+// 用于比较机型名称和规格大小的排序函数
+func machineNameLess(a, b string) bool {
+	re := regexp.MustCompile(`([a-zA-Z0-9]+)\.(\d+)(xlarge)`)
+	matchesA := re.FindStringSubmatch(a)
+	matchesB := re.FindStringSubmatch(b)
+	log.Debugf("%v,%v", matchesA, matchesB)
+
+	if len(matchesA) < 4 || len(matchesB) < 4 {
+		return a < b
+	}
+
+	// 比较机型类型部分
+	typeA, typeB := matchesA[1], matchesB[1]
+	if typeA != typeB {
+		return typeA < typeB
+	}
+
+	sizeA := matchesA[2]
+	sizeB := matchesB[2]
+
+	numA, errA := strconv.Atoi(sizeA)
+	numB, errB := strconv.Atoi(sizeB)
+
+	if errA == nil && errB == nil {
+		if numA != numB {
+			return numA < numB
+		}
+	}
+
+	return matchesA[3] < matchesB[3]
+}
+
+// 自定义的排序函数，用于对 BenchmarkResult 数组进行排序
+func sortBenchmarkResultsByMachine(results []BenchmarkResult) {
+	sort.Slice(results, func(i, j int) bool {
+		return machineNameLess(results[i].MachineType, results[j].MachineType)
+	})
 }
 
 // ParseAndPrintResults 解析目录中的日志文件并按不同测试类型打印结果
 func ParseAndPrintAllResults(dirPath string) error {
-	// 获取目录下所有文件
 	files, err := os.ReadDir(dirPath)
 	if err != nil {
 		return fmt.Errorf("Failed to read directory %s: %v", dirPath, err)
@@ -184,11 +226,9 @@ func ParseAndPrintAllResults(dirPath string) error {
 		if file.IsDir() {
 			continue // 跳过目录
 		}
-
-		// 根据文件名的模式来解析文件类型
 		baseName := file.Name()
 		var testType string
-		re := regexp.MustCompile(`-(oltp_read_only|write_only|read_write)\.log$`)
+		re := regexp.MustCompile(`-(oltp_read_only|oltp_write_only|oltp_read_write)\.log$`)
 		match := re.FindStringSubmatch(baseName)
 		if match == nil || len(match) < 2 {
 			log.Printf("Skipping file with invalid format: %s", baseName)
@@ -196,13 +236,12 @@ func ParseAndPrintAllResults(dirPath string) error {
 		}
 		testType = match[1]
 
-		// 解析文件
 		rst, err := ParseBenchmarkLog(filepath.Join(dirPath, baseName))
 		if err != nil {
 			log.Errorf("Failed to parse log file %s: %v", baseName, err)
 			continue
 		}
-		// 根据不同的testType将结果存储到对应的切片
+
 		switch testType {
 		case "oltp_read_only":
 			oltpReadOnlyResults = append(oltpReadOnlyResults, rst)
@@ -217,8 +256,8 @@ func ParseAndPrintAllResults(dirPath string) error {
 	metricNames := []string{"tps", "qps", "p95_latency", "avg_latency"}
 	for _, metricName := range metricNames {
 		PrintResults(oltpReadOnlyResults, metricName, "oltp_read_only")
-		//PrintResults(writeOnlyResults, metricName, "write_only")
-		//PrintResults(readWriteResults, metricName, "read_write")
+		PrintResults(writeOnlyResults, metricName, "oltp_write_only")
+		PrintResults(readWriteResults, metricName, "oltp_read_write")
 	}
 
 	return nil

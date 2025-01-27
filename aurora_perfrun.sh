@@ -35,21 +35,21 @@ CMD="$TOOL_PATH --action=init-perftest-env --ec2-instance-id=$ec2_instance_id"
 echo -e "Running: $CMD"
 $CMD
 
-# 执行性能测试（只读、只写和读写）
-echo -e "Starting OLTP Read-Only test..."
-CMD="$TOOL_PATH --action=perftest-run --ec2-instance-id=$ec2_instance_id --cluster-id=$PERFTEST_CLUSTER_NAME --perf-type=oltp_read_only"
-echo -e "Running: $CMD"
-$CMD
+# # 执行性能测试（只读、只写和读写）
+# echo -e "Starting OLTP Read-Only test..."
+# CMD="$TOOL_PATH --action=perftest-run --ec2-instance-id=$ec2_instance_id --cluster-id=$PERFTEST_CLUSTER_NAME --perf-type=oltp_read_only"
+# echo -e "Running: $CMD"
+# $CMD
 
-echo -e "Starting OLTP Write-Only test..."
-CMD="$TOOL_PATH --action=perftest-run --ec2-instance-id=$ec2_instance_id --cluster-id=$PERFTEST_CLUSTER_NAME --perf-type=oltp_write_only"
-echo -e "Running: $CMD"
-$CMD
+# echo -e "Starting OLTP Write-Only test..."
+# CMD="$TOOL_PATH --action=perftest-run --ec2-instance-id=$ec2_instance_id --cluster-id=$PERFTEST_CLUSTER_NAME --perf-type=oltp_write_only"
+# echo -e "Running: $CMD"
+# $CMD
 
-echo -e "Starting OLTP Read-Write test..."
-CMD="$TOOL_PATH --action=perftest-run --ec2-instance-id=$ec2_instance_id --cluster-id=$PERFTEST_CLUSTER_NAME --perf-type=oltp_read_write"
-echo -e "Running: $CMD"
-$CMD
+# echo -e "Starting OLTP Read-Write test..."
+# CMD="$TOOL_PATH --action=perftest-run --ec2-instance-id=$ec2_instance_id --cluster-id=$PERFTEST_CLUSTER_NAME --perf-type=oltp_read_write"
+# echo -e "Running: $CMD"
+# $CMD
 
 # 循环处理数据库实例类型并输出
 echo -e "Processing database instance types..."
@@ -58,7 +58,7 @@ for db_instance_type in $DB_INSTANCE_TYPE_GROUP; do
     echo -e "Testing with DB instance type: $DBINSTYPE"
     
     echo -e "Modifying DB instance type to $DBINSTYPE"
-    CMD="$TOOL_PATH --action=modify-dbinstance-type --cluster-id=$PERFTEST_CLUSTER_NAME  --instance-class=$DBINSTYPE"
+    CMD="$TOOL_PATH --action=modify-dbinstance-type --cluster-id=$PERFTEST_CLUSTER_NAME  --instance-class=$db_instance_type"
     echo -e "Running: $CMD"
     $CMD
 
@@ -86,12 +86,12 @@ echo -e "Performance testing and instance processing completed."
 
 # 清理测试环境，销毁测试资源
 echo -e "Deleting client EC2 instance..."
-CMD="$TOOL_PATH --action=delete-client-ec2 --ec2-instance-id=$ec2_instance_id"
+CMD="$TOOL_PATH --action=delete-client --ec2-instance-id=$ec2_instance_id"
 echo -e "Running: $CMD"
 $CMD
 
 echo -e "Deleting Aurora cluster/instance/paramter-group..."
-CMD="$TOOL_PATH --action=delete-rds --cluster-id=$PERFTEST_CLUSTER_NAME--instance-id=$PERFTEST_CLUSTER_NAME-instance --param-group-name=my-custom-aurora-mysql80"
+CMD="$TOOL_PATH --action=delete-rds --cluster-id=$PERFTEST_CLUSTER_NAME --instance-id=$PERFTEST_CLUSTER_NAME-instance --param-group-name=my-custom-aurora-mysql80"
 echo -e "Running: $CMD"
 $CMD
 echo -e "Clean testing resource and environment  completed."
